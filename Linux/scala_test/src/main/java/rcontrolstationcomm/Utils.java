@@ -46,6 +46,27 @@ public class Utils {
 		return ret;
 	}
 	
+	// getRoutes: 
+	//   Tries to read routes from RControlStation until it gets one of zero length.
+	//   Returns a List of routes. 
+	// ~Why is "car" relevant in the getting of routes?~
+	public static List<List<ROUTE_POINT>> getRoutes(int car, int timeoutMs) { 
+		int routeNum = 0; 
+		
+		List<ROUTE_POINT> route;  
+		List<List<ROUTE_POINT>> ret = new ArrayList<List<ROUTE_POINT>>(); 
+		
+		// TODO: Add a query for the number of routes (req. changes to RControlStation)
+		
+		while ((route = getRoute(car, routeNum, timeoutMs)).size() != 0) { 
+			System.out.printf("adding route\n");
+			ret.add(route);
+			routeNum++;
+		}
+		
+		return ret;
+	}
+	
 	public static boolean addRoute(int car, List<ROUTE_POINT> route, boolean replace,
 			boolean mapOnly, int mapRoute, int timeoutMs) {
 		Pointer<ROUTE_POINT> routePtr = Pointer.allocateArray(ROUTE_POINT.class, route.size());

@@ -24,6 +24,8 @@ import java.util.Random;
 import static java.lang.Math.*;
 import static java.lang.System.out;
 
+// It confuses me that this is called RouteInfo and that it has a member mRoute. 
+// It describes the boundaries for the generation of routes.  
 public class RouteInfo {
 	private double mXMin;
 	private double mXMax;
@@ -31,6 +33,7 @@ public class RouteInfo {
 	private double mYMax;
 	private double mLength;
 	private List<ROUTE_POINT> mRoute;
+	private List<List<ROUTE_POINT>> mInner;
 	private Random mRandom;
 	private int mLastOuterAttempts;
 	private int mLastGeneratedPoints;
@@ -61,7 +64,8 @@ public class RouteInfo {
 		mYMin = 0.0;
 		mYMax = 0.0;
 		mLength = 0.0;
-		mRoute = null;
+		mRoute = null; 
+		mInner = null; 
 		mRandom = new Random();
 		mLastOuterAttempts = 0;
 		mLastGeneratedPoints = 0;
@@ -69,6 +73,11 @@ public class RouteInfo {
 
 	public RouteInfo(List<ROUTE_POINT> route) {
 		setRoute(route);
+	}
+	
+	public RouteInfo(List<ROUTE_POINT> route, List<List<ROUTE_POINT>> inner) { 
+		setRoute(route);
+		mInner = inner; 
 	}
 
 	public void setRoute(List<ROUTE_POINT> route) {
@@ -133,20 +142,22 @@ public class RouteInfo {
 		return mLength;
 	}
 
-	public boolean isPointWithinRoutePolygon(double px, double py) {
-		if (mRoute == null || mRoute.size() < 3) {
+	// isPointInPolygon 
+	//   Static version of isPointWithinRoutePolygon that takes an extra route parameter
+	public static boolean isPointInPolygon(List<ROUTE_POINT> route, double px, double py) {
+		if (route == null || route.size() < 3) {
 			return false;
 		}
 
-		int nVert = mRoute.size();
+		int nVert = route.size();
 		int i, j;
 		boolean c = false;
 
 		for (i = 0, j = nVert - 1;i < nVert;j = i++) {
-			double vxi = mRoute.get(i).px();
-			double vyi = mRoute.get(i).py();
-			double vxj = mRoute.get(j).px();
-			double vyj = mRoute.get(j).py();
+			double vxi = route.get(i).px();
+			double vyi = route.get(i).py();
+			double vxj = route.get(j).px();
+			double vyj = route.get(j).py();
 
 			if (((vyi > py) != (vyj > py)) && 
 					(px < (vxj-vxi) * (py-vyi) / (vyj-vyi) + vxi)) {
@@ -155,14 +166,31 @@ public class RouteInfo {
 		}
 
 		return c;
+
+	}
+	
+	public boolean isPointOutsideInnerPolygons(double px, double py) {
+		
+		if (mInner == null) return true; 
+		
+		return mInner.stream().map(route -> !isPointInPolygon(route,px,py)).reduce(true, (a,b) -> a && b);
+		
+	}
+	
+	public boolean isPointWithinRoutePolygon(double px, double py) {
+		return isPointInPolygon(mRoute, px, py); 
 	}
 
-	public boolean isSegmentWithinRoutePolygon(ROUTE_POINT p1, ROUTE_POINT p2) {
+	// isSegmentInPolygon 
+	//   Static version of isSegmentWithinRoutePolygon 
+	public static boolean isSegmentInPolygon(List<ROUTE_POINT> route, ROUTE_POINT p1, ROUTE_POINT p2) {
 		boolean res = true;
 
-		for (int j = 1;j < mRoute.size();j++) {
-			ROUTE_POINT q1 = mRoute.get(j - 1);
-			ROUTE_POINT q2 = mRoute.get(j);
+		if (lineIntersect(p1,p2,route.get(0), route.get(route.size()-1))) return false;
+		
+		for (int j = 1;j < route.size();j++) {
+			ROUTE_POINT q1 = route.get(j- 1);
+			ROUTE_POINT q2 = route.get(j);
 
 			if (lineIntersect(p1, p2, q1, q2)) {
 				res = false;
@@ -171,10 +199,24 @@ public class RouteInfo {
 		}
 
 		if (res) {
-			res = isPointWithinRoutePolygon(p1.px(), p1.py());
+			res = isPointInPolygon(route, p1.px(), p1.py());
 		}
 
 		return res;
+		
+	}
+
+	public boolean isSegmentWithinRoutePolygon(ROUTE_POINT p1, ROUTE_POINT p2) {
+		return isSegmentInPolygon(mRoute, p1, p2);
+	}
+	
+	public boolean isSegmentOutsideInnerPolygons(ROUTE_POINT p1, ROUTE_POINT p2) {
+		
+		if (mInner == null) return true;
+		
+		return mInner.stream().map((route) -> !isSegmentInPolygon(route,p1,p2)).reduce(true, (a,b) -> a && b); 
+				
+		
 	}
 	
 	public List<ROUTE_POINT> generateRouteWithin(int length,
@@ -289,7 +331,8 @@ public class RouteInfo {
 					ok = true;
 
 					if (i == 0) {
-						if (!isPointWithinRoutePolygon(px, py)) {
+						if (!isPointWithinRoutePolygon(px, py) || 
+							!isPointOutsideInnerPolygons(px,py)) {
 							ok = false;
 						}
 					} else {
@@ -298,7 +341,8 @@ public class RouteInfo {
 						p2.px(px);
 						p2.py(py);
 
-						if (!isSegmentWithinRoutePolygon(p1, p2)) {
+						if (!isSegmentWithinRoutePolygon(p1, p2) || 
+							!isSegmentOutsideInnerPolygons(p1,p2)) {
 							ok = false;
 						}
 						
