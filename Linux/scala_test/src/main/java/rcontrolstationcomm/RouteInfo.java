@@ -23,9 +23,7 @@ import java.util.Random;
 
 import static java.lang.Math.*;
 import static java.lang.System.out;
-
-// It confuses me that this is called RouteInfo and that it has a member mRoute. 
-// It describes the boundaries for the generation of routes.  
+  
 public class RouteInfo {
 	private double mXMin;
 	private double mXMax;
@@ -33,7 +31,7 @@ public class RouteInfo {
 	private double mYMax;
 	private double mLength;
 	private List<ROUTE_POINT> mRoute;
-	private List<List<ROUTE_POINT>> mInner;
+	private List<List<ROUTE_POINT>> mInnerHoles;
 	private Random mRandom;
 	private int mLastOuterAttempts;
 	private int mLastGeneratedPoints;
@@ -65,7 +63,7 @@ public class RouteInfo {
 		mYMax = 0.0;
 		mLength = 0.0;
 		mRoute = null; 
-		mInner = null; 
+		mInnerHoles = null; 
 		mRandom = new Random();
 		mLastOuterAttempts = 0;
 		mLastGeneratedPoints = 0;
@@ -77,7 +75,7 @@ public class RouteInfo {
 	
 	public RouteInfo(List<ROUTE_POINT> route, List<List<ROUTE_POINT>> inner) { 
 		setRoute(route);
-		mInner = inner; 
+		mInnerHoles = inner; 
 	}
 
 	public void setRoute(List<ROUTE_POINT> route) {
@@ -171,52 +169,241 @@ public class RouteInfo {
 	
 	public boolean isPointOutsideInnerPolygons(double px, double py) {
 		
-		if (mInner == null) return true; 
+		if (mInnerHoles == null) return true; 
 		
-		return mInner.stream().map(route -> !isPointInPolygon(route,px,py)).reduce(true, (a,b) -> a && b);
-		
+		boolean isInside = false;
+		for (List<ROUTE_POINT> p: mInnerHoles) {
+			if (isPointInPolygon(p,px,py)) {
+				isInside = true;
+				System.out.printf("POINT IS IN INNER\n");
+				break;
+			}
+		}
+		return !isInside;
+
 	}
 	
 	public boolean isPointWithinRoutePolygon(double px, double py) {
 		return isPointInPolygon(mRoute, px, py); 
 	}
 
-	// isSegmentInPolygon 
-	//   Static version of isSegmentWithinRoutePolygon 
-	public static boolean isSegmentInPolygon(List<ROUTE_POINT> route, ROUTE_POINT p1, ROUTE_POINT p2) {
-		boolean res = true;
+	public static boolean isSegmentIntersectingPolygon(List<ROUTE_POINT>route , ROUTE_POINT p1, ROUTE_POINT p2) { 
+		boolean res = false;
 
-		if (lineIntersect(p1,p2,route.get(0), route.get(route.size()-1))) return false;
+		if (lineIntersect(p1,p2,route.get(0), route.get(route.size()-1))) return true;
 		
 		for (int j = 1;j < route.size();j++) {
 			ROUTE_POINT q1 = route.get(j- 1);
 			ROUTE_POINT q2 = route.get(j);
 
 			if (lineIntersect(p1, p2, q1, q2)) {
-				res = false;
+				res = true;
 				break;
 			}
 		}
 
-		if (res) {
-			res = isPointInPolygon(route, p1.px(), p1.py());
-		}
-
 		return res;
-		
+			
 	}
-
 	public boolean isSegmentWithinRoutePolygon(ROUTE_POINT p1, ROUTE_POINT p2) {
-		return isSegmentInPolygon(mRoute, p1, p2);
+		return !isSegmentIntersectingPolygon(mRoute, p1, p2) && isPointInPolygon(mRoute, p1.px(), p1.py());
 	}
 	
 	public boolean isSegmentOutsideInnerPolygons(ROUTE_POINT p1, ROUTE_POINT p2) {
 		
-		if (mInner == null) return true;
+		if (mInnerHoles == null) return true;
 		
-		return mInner.stream().map((route) -> !isSegmentInPolygon(route,p1,p2)).reduce(true, (a,b) -> a && b); 
+		boolean isInside = false;
+		for (List<ROUTE_POINT> p: mInnerHoles) {
+			if (isSegmentIntersectingPolygon(p,p1,p2) || isPointInPolygon(p,p1.px(),p1.py())) {
+				isInside = true;
+				break;
+			}
+		}
+		return !isInside;
 				
+	}
+	
+	// Generate a route between two points that avoid obstacles
+	// TODO: Clean up 
+	// TODO: change for loops (that does recursive calls) over angles into a clearer selection of, say, 3
+	// TODO: Add randomization in places (for example: if to try leftmost or rightmost angle first). 
+	// TODO: Threading ? (Start n instances, that each search along one path. based on seed ?) 
+	public List<ROUTE_POINT> generateRouteBetween(ROUTE_POINT p1, double ang_p1, ROUTE_POINT p2, int depth) {
+		if (depth >= 200) { 
+			//System.out.printf("Search depth exhausted\n");
+			//List<ROUTE_POINT> resRoute = new ArrayList<ROUTE_POINT>();
+			//resRoute.add(p1); // TODO: REMOVE
+			//return resRoute; //TODO: REMOVE!
+			return null;
+		}
 		
+		if (!(isPointWithinRoutePolygon(p1.px(), p1.py()) && isPointOutsideInnerPolygons(p1.px(), p1.py()))) { 
+			if (depth == 0) { 
+				// This can happen
+				System.out.printf("Starting point rejected\n"); 
+			} else { 
+				// This "SHOULD" never happen (once the code is correct).
+				System.out.printf("Generated point rejected\n");
+				//List<ROUTE_POINT> resRoute = new ArrayList<ROUTE_POINT>();
+				//resRoute.add(p1); // TODO: REMOVE
+				//return resRoute; //TODO: REMOVE!
+			}
+			return null;
+		}
+		
+		final double minDist = 0.6;
+		final double maxDist = 2.0; 
+		final double maxAng  = PI / 6;
+		final double angIncr = PI / 8;
+		
+		double px1 = p1.px();
+		double py1 = p1.py();
+		double qx = p2.px();
+		double qy = p2.py(); 
+		double px2  = px1 + cos(ang_p1) * maxDist;   
+		double py2  = py1 + sin(ang_p1) * maxDist;  
+		double t;
+		
+		List<ROUTE_POINT> resRoute = new ArrayList<ROUTE_POINT>();
+		
+		// BASE CASE: Close enough! 
+		double d = pointDistance(px1,py1,qx,qy); 
+		if (d < 4.0) {
+			resRoute.add(p1);
+			return resRoute;
+		}
+		
+		// BASE CASE: You are home!
+		double ang = angleBetweenLines(px1, py1, px2, py2, px1, py1, qx, qy);
+		if (ang < maxAng && ang > -maxAng) { 
+			Point coll = new Point(0,0);
+			if (!closestLineIntersection(px1,py1,qx,qy,coll)) {
+				ROUTE_POINT rp = new ROUTE_POINT();
+				rp.px(qx);
+				rp.py(qy);
+				rp.speed(3);
+				resRoute.add(p1);
+				resRoute.add(rp);
+				System.out.printf("Home!\n");
+				return resRoute;
+			}
+		}
+				
+		// check if line between p1, p2 is within turning angle. 
+		if ( ang < maxAng && ang > -maxAng ) { 
+			//System.out.printf("WITHIN TURN ANGLE!");
+			// check if there is an intersection free line within turning angle. if there is, return route.
+			Point coll = new Point();
+			boolean intersect = closestLineIntersection(px1, py1, qx, qy, coll);
+			
+			// Abort if no intersection here. Means a fault in implementation.
+			if (!intersect) { 
+				System.out.printf("Should intersect! ");
+				return null;
+			}
+			
+			double collDist = pointDistance(px1,py1,coll.x,coll.y);
+			
+			// Give up if too close. 
+			//if (collDist < minDist) return null;
+					
+			//Try to generate a route from a range of points generated within the turning angle
+			for (double a = -maxAng; a < maxAng; a+=angIncr) { 
+				// margins
+				double t_x = px1 + cos(ang_p1 + a) * (maxDist + minDist); //maxDist; //(collDist - minDist);
+				double t_y = py1 + sin(ang_p1 + a) * (maxDist + minDist); //maxDist; //(collDist - minDist); 
+					
+				double new_x = px1 + cos(ang_p1 + a) * maxDist; //maxDist; //(collDist - minDist);
+				double new_y = py1 + sin(ang_p1 + a) * maxDist; //maxDist; //(collDist - minDist); 
+
+				ROUTE_POINT new_p = new ROUTE_POINT();
+				new_p.px(new_x);
+				new_p.py(new_y);
+				new_p.speed(3);
+				Point cp = new Point();
+
+				// only proceed to search along paths that do not enter into a polygon (with a margin)
+				boolean intersects = closestLineIntersection(px1, py1,t_x, t_y,cp);
+				if (!intersects || pointDistance(px1,py2,cp.x,cp.y) > (maxDist + minDist)) {	
+					//System.out.printf("Generating point within turning angle\n");
+					List<ROUTE_POINT> new_route = generateRouteBetween(new_p,ang_p1 + a, p2, depth +1);
+					if (new_route != null) {
+						// TODO use a collection where adding to front is cheap.
+						//      Or add to the end and do a reverse before use. 
+						new_route.add(0,p1);
+						return new_route;
+					}
+				}
+			} // FOR
+		}		// Target point is not within turning angle
+		
+		// select maximum turn angle that would get us closer to p2 and try again
+		//System.out.printf("Select MAX turn-angle closer to target\n");
+		ROUTE_POINT closestPoint = new ROUTE_POINT();
+		double bestAngle = 0; 
+		double smallestDist = Double.MAX_VALUE;
+		boolean ok = false;
+		for (double a = -maxAng; a < maxAng; a+=angIncr) { 
+			double t_x = px1 + cos(ang_p1 + a) * (maxDist + minDist);
+			double t_y = py1 + sin(ang_p1 + a) * (maxDist + minDist); 
+			
+			double new_x = px1 + cos(ang_p1 + a) * maxDist;
+			double new_y = py1 + sin(ang_p1 + a) * maxDist; 
+			
+			ROUTE_POINT new_p = new ROUTE_POINT();
+			new_p.px(new_x);
+			new_p.py(new_y);
+			new_p.speed(3);
+			Point collPoint = new Point(0,0); 
+				
+			// Distance to target-point.
+			double dist = pointDistance(new_x, new_y, qx, qy);
+			if (!closestLineIntersection(px1, py1, t_x, t_y, collPoint)) { 
+				//System.out.printf("DOES THIS EVEN HAPPEN?\n");
+				if (dist < smallestDist) { 
+					closestPoint = new_p;
+					bestAngle = ang_p1 + a;
+					smallestDist = dist;
+					ok = true;
+				}
+			}
+		}
+			
+		if (ok) { 
+			//System.out.printf("Generating point based on ok!\n");
+			List<ROUTE_POINT> new_route = generateRouteBetween(closestPoint,bestAngle, p2, depth+1);
+			// TODO use a collection where adding to front is cheap.
+			//      Or add to the end and do a reverse before use.
+			if (new_route != null) { 
+				new_route.add(0,p1);
+				return new_route;
+			}
+			//System.out.printf("Didnt work\n");
+		} 
+		
+		// move some distance forward and try again
+		double new_x = px1 + cos(ang_p1) * maxDist;
+		double new_y = py1 + sin(ang_p1) * maxDist;
+		Point collPoint = new Point(0,0); 
+		//System.out.printf("ELSE %d ", depth);
+		boolean intersects = closestLineIntersection(px1, py1, new_x, new_y, collPoint);
+			
+		if (!intersects || (intersects && pointDistance(px1,py1,collPoint.x,collPoint.y) > maxDist)) {
+			//System.out.printf("Generating move forward point");
+			ROUTE_POINT new_p = new ROUTE_POINT();
+			new_p.px(new_x);
+			new_p.py(new_y);
+			new_p.speed(3);
+			List<ROUTE_POINT> new_route = generateRouteBetween(new_p,ang_p1, p2, depth+1);
+			if (new_route != null) { 
+				new_route.add(0,p1);
+				return new_route;
+			}	
+		}
+		
+		
+		return null;
 	}
 	
 	public List<ROUTE_POINT> generateRouteWithin(int length,
@@ -478,26 +665,29 @@ public class RouteInfo {
 		double lastDist = 0.0;
 		Point pStart = new Point(p0_x, p0_y);
 		
-		for (int i = 1;i < mRoute.size();i++) {
-			if (getLineIntersection(p0_x, p0_y, p1_x, p1_y,
-					mRoute.get(i - 1).px(), mRoute.get(i - 1).py(),
-					mRoute.get(i).px(), mRoute.get(i).py(), collLast)) {
+		List<List<ROUTE_POINT>> routes = new ArrayList<List<ROUTE_POINT>>(mInnerHoles); 
+		routes.add(mRoute);
+		for ( List<ROUTE_POINT> route : routes) {
+			for (int i = 0, j = route.size() - 1; i < route.size();j = i++) {
+				if (getLineIntersection(p0_x, p0_y, p1_x, p1_y,
+						route.get(i).px(), route.get(i).py(),
+						route.get(j).px(), route.get(j).py(), collLast)) {
 				
-				if (res) {
-					double dist = lastDist = pointDistance(pStart, collLast);
-					if (dist < lastDist) {
+					if (res) {
+						double dist = lastDist = pointDistance(pStart, collLast);
+						if (dist < lastDist) {
+							coll.setTo(collLast);
+							lastDist = dist;
+						}
+					} else {
 						coll.setTo(collLast);
-						lastDist = dist;
+						lastDist = pointDistance(pStart, collLast);
 					}
-				} else {
-					coll.setTo(collLast);
-					lastDist = pointDistance(pStart, collLast);
-				}
-				
-				res = true;
-			}
-			
-		}
+					
+					res = true;
+				} //end if intersection
+			}// end for each line of polygon			
+		}// end for each polygon
 		
 		return res;
 	}

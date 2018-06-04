@@ -120,7 +120,7 @@ object CarSpec extends Commands2 {
     
     State(
       new RpList(Buffer.empty[ROUTE_POINT]),
-      new RpList(routes.asScala(0).asScala), // getRoute(0, 0, 1000).asScala),
+      new RpList(routes.asScala(0).asScala), 
       new RouteInfo(routes.asScala(2), inner),
       driveRoute
       )
@@ -201,7 +201,7 @@ object CarTester {
     //    randomDrivingTest()
     //    randomGenTest()
 
-    testScala(2)
+    // testScala(2)
     //    runLastTest()
     runLastTestHdd()
 
@@ -298,6 +298,98 @@ object CarTester {
     }
   }
 
+  def routeBetweenTest() { 
+    val routes = getRoutes(0,5000)
+    val numRoutes = routes.size()
+    
+    val numInner = numRoutes - RouteNum.firstInner
+    val inner = routes.subList(RouteNum.firstInner,numRoutes) 
+    
+    val driveRoute = numRoutes
+    
+    val edgeRoute = routes.asScala(RouteNum.outer)
+    val startRoute = routes.asScala(RouteNum.start)
+    val recoveryRoute = routes.asScala(RouteNum.recovery)
+        
+    val r = new RouteInfo(edgeRoute,inner)
+    var numFound = 0;
+    
+    rcsc_clearRoute(-1, driveRoute, 5000) 
+    
+    
+    
+    
+    for ( i <- 0 to 1000 ) {
+      
+      println("routeBetweenTest " + i)
+      
+      val rp = new ROUTE_POINT
+      rp.speed(3.1)
+      rp.time(2900)
+      val ang = r.randInRange(0,2 * 3.14159)  
+      rp.px(r.randInRange(30.0, 40.0))
+      rp.py(r.randInRange(-20.0, 40.0))
+      
+      val returnRoute = r.generateRouteBetween(rp, ang, recoveryRoute.get(0), 0)
+    
+      if (returnRoute != null && returnRoute.size() > 0  ) { 
+        println("non-null route")
+        numFound = numFound + 1
+        addRoute(0, returnRoute, true, true, driveRoute, 2000)
+      }
+      Thread.sleep(10)
+    }
+    rcsc_clearRoute(-1, driveRoute, 5000)
+    println("Routes found: " + numFound);
+    
+  }
+
+  def routeBetweenTestInteractive() { 
+    val routes = getRoutes(0,5000)
+    val numRoutes = routes.size()
+    
+    val numInner = numRoutes - RouteNum.firstInner
+    val inner = routes.subList(RouteNum.firstInner,numRoutes) 
+    
+    val driveRoute = numRoutes
+    
+    val edgeRoute = routes.asScala(RouteNum.outer)
+    val startRoute = routes.asScala(RouteNum.start)
+    val recoveryRoute = routes.asScala(RouteNum.recovery)
+        
+    val r = new RouteInfo(edgeRoute,inner)
+    
+    while(true) {
+      rcsc_clearRoute(-1, driveRoute, 5000) 
+      val carState = getCarState(0,5000)
+      
+      val rp = new ROUTE_POINT
+      rp.speed(3.1)
+      rp.time(2900)
+      val ang = (-carState.yaw()) * 3.14159 / 180  
+      rp.px(carState.px())
+      rp.py(carState.py())
+      println("CAR Angle " + (-carState.yaw()))
+      println("YAW " + ang)
+      
+      val ang_use = 
+        if (ang > 3.14159) { ang - 2*3.14159 } 
+        else { if (ang < -3.14159) { ang + 2*3.14159 } else { ang }}   
+      
+      println("YAW USE" + ang_use)
+    
+      val returnRoute = r.generateRouteBetween(rp, ang_use, recoveryRoute.get(0), 0)
+    
+      if (returnRoute != null && returnRoute.size() > 0  ) { 
+        addRoute(0, returnRoute, true, true, driveRoute, 2000)
+      }  else { 
+        println("Failed to find route")
+      }
+      Thread.sleep(100);
+    }
+  }
+
+  
   def randomGenTest() {
     
     val routes = getRoutes(0,5000)
@@ -316,7 +408,7 @@ object CarTester {
     var usedPoints = 0
     val r = new RouteInfo(edgeRoute,inner);
 
-    for (i <- 0 to 5) {
+    for (i <- 0 to 5) { 
       var rGen = startRoute
       var indLast = 0
 
