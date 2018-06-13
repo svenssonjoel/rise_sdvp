@@ -326,11 +326,11 @@ object CarTester {
       val rp = new ROUTE_POINT
       rp.speed(3.1)
       rp.time(2900)
-      val ang = r.randInRange(0,2 * 3.14159)  
+      val ang = r.randInRange(0,2 * Math.PI) // Incorrect form  
       rp.px(r.randInRange(30.0, 40.0))
       rp.py(r.randInRange(-20.0, 40.0))
       
-      val returnRoute = r.generateRouteBetween(rp, ang, recoveryRoute.get(0), 0)
+      val returnRoute = r.generateRouteBetween(rp, ang, recoveryRoute.get(0), Math.PI/6, 0)
     
       if (returnRoute != null && returnRoute.size() > 0  ) { 
         println("non-null route")
@@ -366,19 +366,19 @@ object CarTester {
       val rp = new ROUTE_POINT
       rp.speed(3.1)
       rp.time(2900)
-      val ang = (-carState.yaw()) * 3.14159 / 180  
+      val ang = (-carState.yaw()) * Math.PI / 180  
       rp.px(carState.px())
       rp.py(carState.py())
       println("CAR Angle " + (-carState.yaw()))
       println("YAW " + ang)
       
       val ang_use = 
-        if (ang > 3.14159) { ang - 2*3.14159 } 
-        else { if (ang < -3.14159) { ang + 2*3.14159 } else { ang }}   
+        if (ang > Math.PI) { ang - 2*Math.PI } 
+        else { if (ang < -Math.PI) { ang + 2*Math.PI } else { ang }}   
       
       println("YAW USE" + ang_use)
     
-      val returnRoute = r.generateRouteBetweenThreaded(rp, ang_use, recoveryRoute.get(0), 0)
+      val returnRoute = r.generateRouteBetween(rp, ang_use, recoveryRoute.get(0),Math.PI/3, 0)
     
       if (returnRoute != null && returnRoute.size() > 0  ) { 
         addRoute(0, returnRoute, true, true, driveRoute, 2000)

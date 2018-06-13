@@ -227,10 +227,8 @@ public class RouteInfo {
 	
 	// Generate a route between two points that avoid obstacles
 	// TODO: Clean up 
-	// TODO: change for loops (that does recursive calls) over angles into a clearer selection of, say, 3
-	// TODO: Add randomization in places (for example: if to try leftmost or rightmost angle first). 
-	// TODO: Threading ? (Start n instances, that each search along one path. based on seed ?) 
-	public List<ROUTE_POINT> generateRouteBetween(ROUTE_POINT p1, double ang_p1, ROUTE_POINT p2, int depth) {
+	// TODO: change for loops (that does recursive calls) over angles into a cleaner selection of, say, 3 specific angles  
+	public List<ROUTE_POINT> generateRouteBetween(ROUTE_POINT p1, double ang_p1, ROUTE_POINT p2, double max_ang, int depth) {
 		if (depth >= 200) { 
 			//System.out.printf("Search depth exhausted\n");
 			//List<ROUTE_POINT> resRoute = new ArrayList<ROUTE_POINT>();
@@ -255,7 +253,7 @@ public class RouteInfo {
 		
 		final double minDist = 0.6;
 		final double maxDist = 2.0; 
-		final double maxAng  = PI / 6;
+		final double maxAng  = max_ang; //PI / 6;
 		final double angIncr = PI / 8;
 		
 		double px1 = p1.px();
@@ -328,7 +326,7 @@ public class RouteInfo {
 				boolean intersects = closestLineIntersection(px1, py1,t_x, t_y,cp);
 				if (!intersects || pointDistance(px1,py2,cp.x,cp.y) > (maxDist + minDist)) {	
 					//System.out.printf("Generating point within turning angle\n");
-					List<ROUTE_POINT> new_route = generateRouteBetween(new_p,ang_p1 + a, p2, depth +1);
+					List<ROUTE_POINT> new_route = generateRouteBetween(new_p,ang_p1 + a, p2, max_ang, depth +1);
 					if (new_route != null) {
 						// TODO use a collection where adding to front is cheap.
 						//      Or add to the end and do a reverse before use. 
@@ -373,7 +371,7 @@ public class RouteInfo {
 			
 		if (ok) { 
 			//System.out.printf("Generating point based on ok!\n");
-			List<ROUTE_POINT> new_route = generateRouteBetween(closestPoint,bestAngle, p2, depth+1);
+			List<ROUTE_POINT> new_route = generateRouteBetween(closestPoint,bestAngle, p2, max_ang, depth+1);
 			// TODO use a collection where adding to front is cheap.
 			//      Or add to the end and do a reverse before use.
 			if (new_route != null) { 
@@ -396,7 +394,7 @@ public class RouteInfo {
 			new_p.px(new_x);
 			new_p.py(new_y);
 			new_p.speed(3);
-			List<ROUTE_POINT> new_route = generateRouteBetween(new_p,ang_p1, p2, depth+1);
+			List<ROUTE_POINT> new_route = generateRouteBetween(new_p,ang_p1, p2, max_ang, depth+1);
 			if (new_route != null) { 
 				new_route.add(0,p1);
 				return new_route;
