@@ -378,7 +378,7 @@ object CarTester {
       
       println("YAW USE" + ang_use)
     
-      val returnRoute = r.generateRouteBetween(rp, ang_use, recoveryRoute.get(0), 0)
+      val returnRoute = r.generateRouteBetweenThreaded(rp, ang_use, recoveryRoute.get(0), 0)
     
       if (returnRoute != null && returnRoute.size() > 0  ) { 
         addRoute(0, returnRoute, true, true, driveRoute, 2000)

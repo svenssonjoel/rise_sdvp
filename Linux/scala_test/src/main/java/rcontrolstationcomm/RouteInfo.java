@@ -18,6 +18,7 @@
 package rcontrolstationcomm;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.Random;
 
@@ -403,6 +404,255 @@ public class RouteInfo {
 		}
 		
 		
+		return null;
+	}
+
+	// Generate a route between two points that avoid obstacles with "randomness"
+	public List<ROUTE_POINT> generateRouteBetweenRandom(ROUTE_POINT p1, double ang_p1, ROUTE_POINT p2, int depth, Random gen) {
+		// At most 100 iterations (no branching in the call tree!) 
+		if (depth >= 100) { 
+			return null;
+		}
+			
+		if (!(isPointWithinRoutePolygon(p1.px(), p1.py()) && isPointOutsideInnerPolygons(p1.px(), p1.py()))) { 
+			if (depth == 0) { 
+				// This can happen
+				System.out.printf("Starting point rejected\n"); 
+			} else { 
+				// This "SHOULD" never happen (once the code is correct).
+				System.out.printf("Generated point rejected\n");
+			}
+			return null;
+		}
+			
+		final double minDist = 0.6;
+		final double maxDist = 2.0; 
+		final double maxAng  = PI / 6;
+		final double angIncr = PI / 8;
+		
+		double px1 = p1.px();
+		double py1 = p1.py();
+		double qx = p2.px();
+		double qy = p2.py(); 
+		double px2  = px1 + cos(ang_p1) * maxDist;   	
+		double py2  = py1 + sin(ang_p1) * maxDist;  
+		double t;
+			
+		List<ROUTE_POINT> resRoute = new ArrayList<ROUTE_POINT>();
+			
+		// BASE CASE: Close enough! 
+		double d = pointDistance(px1,py1,qx,qy); 
+		if (d < 4.0) {
+			resRoute.add(p1);
+			return resRoute;
+		}
+			
+		// BASE CASE: You are home!
+		double ang = angleBetweenLines(px1, py1, px2, py2, px1, py1, qx, qy);
+		if (ang < maxAng && ang > -maxAng) { 
+			Point coll = new Point(0,0);
+			if (!closestLineIntersection(px1,py1,qx,qy,coll)) {
+				ROUTE_POINT rp = new ROUTE_POINT();
+				rp.px(qx);
+				rp.py(qy);
+				rp.speed(3);
+				resRoute.add(p1);
+				resRoute.add(rp);
+				System.out.printf("Home!\n");
+				return resRoute;
+			}
+		}
+					
+		// check if line between p1, p2 is within turning angle. 
+		if ( ang < maxAng && ang > -maxAng ) { 
+			//System.out.printf("WITHIN TURN ANGLE!");
+			// check if there is an intersection free line within turning angle. if there is, return route.
+			Point coll = new Point();
+			boolean intersect = closestLineIntersection(px1, py1, qx, qy, coll);
+			
+			// Abort if no intersection here. Means a fault in implementation.
+			if (!intersect) { 
+				System.out.printf("Should intersect! ");
+				return null;
+			}
+				
+			double collDist = pointDistance(px1,py1,coll.x,coll.y);
+			
+			// Give up if too close. 
+			//if (collDist < minDist) return null;
+			
+			//Try a random turning angle
+			// Maybe there are better choices here 
+			double a = -maxAng + (2*maxAng) * gen.nextDouble(); 
+			
+			// margins
+			double t_x = px1 + cos(ang_p1 + a) * (maxDist + minDist); //maxDist; //(collDist - minDist);
+			double t_y = py1 + sin(ang_p1 + a) * (maxDist + minDist); //maxDist; //(collDist - minDist); 
+						
+			double new_x = px1 + cos(ang_p1 + a) * maxDist; //maxDist; //(collDist - minDist);
+			double new_y = py1 + sin(ang_p1 + a) * maxDist; //maxDist; //(collDist - minDist); 
+
+			ROUTE_POINT new_p = new ROUTE_POINT();
+			new_p.px(new_x);
+			new_p.py(new_y);
+			new_p.speed(3);
+			Point cp = new Point();
+				
+			// only proceed to search if path does not enter into a polygon (with a margin)
+			boolean intersects = closestLineIntersection(px1, py1,t_x, t_y,cp);
+			if (!intersects || pointDistance(px1,py2,cp.x,cp.y) > (maxDist + minDist)) {	
+				//System.out.printf("Generating point within turning angle\n");
+				List<ROUTE_POINT> new_route = generateRouteBetweenRandom(new_p,ang_p1 + a, p2, depth +1,gen);
+				if (new_route != null) {
+					// TODO use a collection where adding to front is cheap.
+					//      Or add to the end and do a reverse before use. 
+					new_route.add(0,p1);
+					return new_route;
+				}
+			}	
+		}		
+		
+		///////////////////////////////////////////
+		// Target point is not within turning angle
+		
+
+		// I think it makes sense to try to turn towards the target point in this case!
+		// select maximum turn angle that would get us closer to p2 and try again
+		ROUTE_POINT closestPoint = new ROUTE_POINT();
+		double bestAngle = 0; 
+		double smallestDist = Double.MAX_VALUE;
+		boolean ok = false;
+		for (double a = -maxAng; a < maxAng; a+=angIncr) { 
+			double t_x = px1 + cos(ang_p1 + a) * (maxDist + minDist);
+			double t_y = py1 + sin(ang_p1 + a) * (maxDist + minDist); 
+			
+			double new_x = px1 + cos(ang_p1 + a) * maxDist;
+			double new_y = py1 + sin(ang_p1 + a) * maxDist; 
+				
+			ROUTE_POINT new_p = new ROUTE_POINT();
+			new_p.px(new_x);
+			new_p.py(new_y);
+			new_p.speed(3);
+			Point collPoint = new Point(0,0); 
+					
+			// Distance to target-point.
+			double dist = pointDistance(new_x, new_y, qx, qy);
+			if (!closestLineIntersection(px1, py1, t_x, t_y, collPoint)) { 
+				//System.out.printf("DOES THIS EVEN HAPPEN?\n");
+				if (dist < smallestDist) { 
+					closestPoint = new_p;
+					bestAngle = ang_p1 + a;
+					smallestDist = dist;
+					ok = true;
+				}
+			}
+		}
+				
+		if (ok) { 
+			//System.out.printf("Generating point based on ok!\n");
+			List<ROUTE_POINT> new_route = generateRouteBetweenRandom(closestPoint,bestAngle, p2, depth+1,gen);
+			// TODO use a collection where adding to front is cheap.
+			//      Or add to the end and do a reverse before use.
+			if (new_route != null) { 
+				new_route.add(0,p1);
+				return new_route;
+			}
+			//System.out.printf("Didnt work\n");
+		} 
+	
+		// At this point in the code the target point is not in 
+		// turning angle and we failed to turn towards it. 
+		
+		// Make a choice between moving forward and turning
+		int choice = gen.nextInt(2);
+				
+		switch(choice) {
+		case 0: 
+			break;
+					
+		case 1: 
+			break;
+					
+		default:	
+			System.out.printf("Impossible fall-through case"); 
+			break;
+		}
+				
+		// move some distance forward and try again
+		double new_x = px1 + cos(ang_p1) * maxDist;
+		double new_y = py1 + sin(ang_p1) * maxDist;
+		Point collPoint = new Point(0,0); 
+		//System.out.printf("ELSE %d ", depth);
+		boolean intersects = closestLineIntersection(px1, py1, new_x, new_y, collPoint);
+				
+		if (!intersects || (intersects && pointDistance(px1,py1,collPoint.x,collPoint.y) > maxDist)) {
+			//System.out.printf("Generating move forward point");
+			ROUTE_POINT new_p = new ROUTE_POINT();
+			new_p.px(new_x);
+			new_p.py(new_y);
+			new_p.speed(3);
+			List<ROUTE_POINT> new_route = generateRouteBetweenRandom(new_p,ang_p1, p2, depth+1,gen);
+			if (new_route != null) { 
+				new_route.add(0,p1);
+				return new_route;
+			}	
+		}
+			
+			
+		return null;
+	}
+
+	
+	// Tries to generate many routes and selects the shortest (if one exist)
+	public List<ROUTE_POINT> generateRouteBetweenThreaded(ROUTE_POINT p1, double ang_p1, ROUTE_POINT p2, int depth) {
+		
+		final int NumThreads = 10;
+		
+		List<List<ROUTE_POINT>> results = Collections.synchronizedList(new ArrayList<List<ROUTE_POINT>>());
+		
+		for (int i = 0; i < NumThreads; i ++) {
+			Thread t = new Thread(new Runnable() {
+				public void run() { 
+					List<ROUTE_POINT> l = null;; 
+					Random rGen = new Random();
+					rGen.setSeed(System.currentTimeMillis());
+					l = generateRouteBetweenRandom(p1,ang_p1, p2, 0,rGen);
+					if (l != null); 
+					
+					results.add(l);
+				}
+				
+			});
+			t.start();
+		}
+		try {
+			Thread.sleep(10);
+		} catch (InterruptedException e) {
+			// TODO Auto-generated catch block
+			e.printStackTrace();
+		}
+		for (int i = 0; i < results.size(); i ++) { 
+			List<ROUTE_POINT> l = results.get(i);
+			if (l != null) { 
+				System.out.printf("results[i].size = %d",l.size() );
+			}
+		}
+		
+		// Experimenting 
+		int shortest = Integer.MAX_VALUE;
+		List<ROUTE_POINT> shortestRandomPath = null; 
+		for (int i = 0; i < results.size(); i ++) { 
+			List<ROUTE_POINT> l = results.get(i);
+			if (l != null) { 
+				if ( l.size() < shortest) { 
+					shortest = l.size(); 
+					shortestRandomPath = l;
+				}
+			}
+		}
+		if (shortestRandomPath != null) { 
+			return shortestRandomPath;
+		}
 		return null;
 	}
 	
