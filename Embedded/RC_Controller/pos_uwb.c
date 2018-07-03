@@ -49,6 +49,7 @@ static void cmd_terminal_list_anchors(int argc, const char **argv);
 void pos_uwb_init(void) {
 	m_anchor_last = 0;
 	memset(&m_pos, 0, sizeof(m_pos));
+	memset(&m_anchors, 0, sizeof(m_anchors));
 	chMtxObjectInit(&m_mutex_pos);
 
 	chThdCreateStatic(uwb_thread_wa, sizeof(uwb_thread_wa),
@@ -104,14 +105,24 @@ void pos_uwb_set_xya(float x, float y, float angle) {
 static void dw_range(uint8_t id, uint8_t dest, float range) {
 	(void)id;
 
+	float dt = 1.0;
+
 	UWB_ANCHOR *a = 0;
 	for (int i = 0;i < m_anchor_last;i++) {
 		if (m_anchors[i].id == dest) {
 			a = &m_anchors[i];
 			a->dist_last = range;
+
+			dt = (float)(chVTGetSystemTimeX() - a->timestamp) /
+					(float)CH_CFG_ST_FREQUENCY;
+
+			a->timestamp = chVTGetSystemTimeX();
 			break;
 		}
 	}
+
+	// Unused
+	(void)dt;
 
 	if (a) {
 		chMtxLock(&m_mutex_pos);
@@ -124,20 +135,18 @@ static void dw_range(uint8_t id, uint8_t dest, float range) {
 
 		const float dx = a->px - px;
 		const float dy = a->py - py;
-		float d = sqrtf(SQ(dx) * SQ(dy));
-
-		// Avoid divide by 0
-		if (d < 0.01) {
-			d = 0.01;
-		}
+		float d = sqrtf(SQ(dx) + SQ(dy));
+		d = d < 0.01 ? 0.01 : d; // Avoid divide by 0
 
 		const float diff = d - a->dist_last;
-		const float ca = dx / d;
-		const float sa = dy / d;
-		const float corr_step = SIGN(diff) * MIN(fabsf(diff), CORR_STEP);
+		if (diff < 8.0) {
+			const float ca = dx / d;
+			const float sa = dy / d;
+			const float corr_step = SIGN(diff) * MIN(fabsf(diff), CORR_STEP);
 
-		m_pos.px += corr_step * ca;
-		m_pos.py += corr_step * sa;
+			m_pos.px += corr_step * ca;
+			m_pos.py += corr_step * sa;
+		}
 
 		chMtxUnlock(&m_mutex_pos);
 	}
@@ -151,7 +160,10 @@ static THD_FUNCTION(uwb_thread, arg) {
 	int anchor_index = 0;
 
 	for (;;) {
-		int next = (anchor_index + 1) % (m_anchor_last + 1);
+		int next = (anchor_index + 1);
+		if (next >= m_anchor_last) {
+			next = 0;
+		}
 
 		chMtxLock(&m_mutex_pos);
 		while (next != anchor_index) {
@@ -163,11 +175,14 @@ static THD_FUNCTION(uwb_thread, arg) {
 				break;
 			}
 
-			next = (next + 1) % (m_anchor_last + 1);
+			next++;
+			if (next >= m_anchor_last) {
+				next = 0;
+			}
 		}
 		chMtxUnlock(&m_mutex_pos);
 
-		chThdSleepMilliseconds(50);
+		chThdSleepMilliseconds(100);
 	}
 }
 
@@ -178,16 +193,21 @@ static void cmd_terminal_list_anchors(int argc, const char **argv) {
 	commands_printf("UWB anchor list:");
 
 	for (int i = 0;i < m_anchor_last;i++) {
+		float age = (float)(chVTGetSystemTimeX() - m_anchors[i].timestamp) /
+				(float)CH_CFG_ST_FREQUENCY;
+
 		commands_printf(
 				"ID       : %d\n"
 				"PX       : %.2f\n"
 				"PY       : %.2f\n"
-				"Height   : %.2f\n"
-				"Last dist: %.2f\n\n",
+				"Height   : %.2f m\n"
+				"Last dist: %.2f m\n"
+				"Age      : %.2f s\n\n",
 				m_anchors[i].id,
 				(double)m_anchors[i].px,
 				(double)m_anchors[i].py,
 				(double)m_anchors[i].height,
-				(double)m_anchors[i].dist_last);
+				(double)m_anchors[i].dist_last,
+				(double)age);
 	}
 }
