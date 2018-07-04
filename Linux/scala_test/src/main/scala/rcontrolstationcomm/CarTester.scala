@@ -269,10 +269,11 @@ object CarTester {
     val numInner = numRoutes - RouteNum.firstInner
     val inner = routes.subList(RouteNum.firstInner,numRoutes) 
     
-    val driveRoute = numRoutes
+    val driveRoute = numRoutes 
        
     val edgeRoute = routes.asScala(RouteNum.outer)
     val startRoute = routes.asScala(RouteNum.start)
+    val recoveryRoute = routes.asScala(RouteNum.recovery)
     
     val r = new RouteInfo(edgeRoute,inner);
 
@@ -281,7 +282,37 @@ object CarTester {
       var indLast = 0
 
       rcsc_clearRoute(0, driveRoute, 5000)
-      followRecoveryRoute(0, 1)
+      
+      // Generate a return route
+      val carState = getCarState(0,5000)
+      
+      val rp = new ROUTE_POINT
+      rp.speed(3.1)
+      rp.time(2900)
+      val ang = (-carState.yaw()) * Math.PI / 180    
+      rp.px(carState.px())
+      rp.py(carState.py())
+      
+      val ang_use = 
+        if (ang > Math.PI) { ang - 2*Math.PI } 
+        else { if (ang < -Math.PI) { ang + 2*Math.PI } else { ang }}   
+      
+      val returnRoute = r.generateRouteBetween(rp, ang_use, recoveryRoute.get(0),Math.PI/3, 0)
+   
+      if (returnRoute != null && returnRoute.size() > 0  ) { 
+        addRoute(0, returnRoute, true, true, driveRoute, 2000)
+        // follow return to recovery route
+        followRecoveryRoute(0, driveRoute)
+        rcsc_clearRoute(0, driveRoute, 5000)
+        // follow recovery route 
+        followRecoveryRoute(0, RouteNum.recovery)
+        
+      }  else { 
+        println("Failed to find a return route")
+        
+      }
+      
+      
       rcsc_setAutopilotActive(0, true, 2000)
 
       for (i <- 0 to 8) {
@@ -315,10 +346,7 @@ object CarTester {
     var numFound = 0;
     
     rcsc_clearRoute(-1, driveRoute, 5000) 
-    
-    
-    
-    
+        
     for ( i <- 0 to 1000 ) {
       
       println("routeBetweenTest " + i)
