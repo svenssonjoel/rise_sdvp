@@ -225,6 +225,7 @@ void CarInterface::setStateData(CAR_STATE data)
         LocPoint ap_goal = car->getApGoal();
         loc.setYaw(data.yaw * M_PI / 180.0);
         loc.setXY(data.px, data.py);
+        loc.setSpeed(data.speed);
         loc_gps.setXY(data.px_gps, data.py_gps);
         loc_uwb.setXY(data.px_uwb, data.py_uwb);
         ap_goal.setXY(data.ap_goal_px, data.ap_goal_py);
@@ -503,6 +504,16 @@ void CarInterface::nmeaReceived(quint8 id, QByteArray nmea_msg)
 {
     if (id == mId) {
         ui->nmeaWidget->inputNmea(nmea_msg);
+
+        if (mMap) {
+            CarInfo *car = mMap->getCarInfo(mId);
+
+            if (car) {
+                LocPoint loc_gps = car->getLocationGps();
+                loc_gps.setInfo(ui->nmeaWidget->fixType());
+                car->setLocationGps(loc_gps);
+            }
+        }
     }
 }
 
@@ -874,6 +885,7 @@ void CarInterface::getConfGui(MAIN_CONFIG &conf)
     conf.car.yaw_imu_gain = ui->confYawImuGainBox->value();
     conf.car.disable_motor = ui->confMiscDisableMotorBox->isChecked();
     conf.car.simulate_motor = ui->confMiscSimulateMotorBox->isChecked();
+    conf.car.clamp_imu_yaw_stationary = ui->confClampImuYawBox->isChecked();
 
     conf.car.gear_ratio = ui->confGearRatioBox->value();
     conf.car.wheel_diam = ui->confWheelDiamBox->value();
@@ -894,6 +906,7 @@ void CarInterface::setConfGui(MAIN_CONFIG &conf)
     ui->confYawImuGainBox->setValue(conf.car.yaw_imu_gain);
     ui->confMiscDisableMotorBox->setChecked(conf.car.disable_motor);
     ui->confMiscSimulateMotorBox->setChecked(conf.car.simulate_motor);
+    ui->confClampImuYawBox->setChecked(conf.car.clamp_imu_yaw_stationary);
 
     ui->confGearRatioBox->setValue(conf.car.gear_ratio);
     ui->confWheelDiamBox->setValue(conf.car.wheel_diam);

@@ -221,6 +221,7 @@ typedef struct {
 	float yaw_imu_gain; // Gain for yaw angle from IMU (vs odometry)
 	bool disable_motor; // Disable motor drive commands to make sure that the motor does not move.
 	bool simulate_motor; // Simulate motor movement without motor controller feedback
+	bool clamp_imu_yaw_stationary; // Clamp IMU yaw when car is stationary
 
 	float gear_ratio;
 	float wheel_diam;
@@ -229,6 +230,8 @@ typedef struct {
 	float steering_center;
 	float steering_range;
 	float steering_ramp_time; // Ramp time constant for the steering servo in seconds
+	// Distance between front and rear wheels in ackermann mode, distance between drive wheels
+	// in differential mode.
 	float axis_distance;
 } MAIN_CONFIG_CAR;
 
@@ -863,6 +866,14 @@ typedef enum {
 	SENSOR_MODE_HYBRID
 } mc_sensor_mode;
 
+// Auxiliary output mode
+typedef enum {
+	OUT_AUX_MODE_OFF = 0,
+	OUT_AUX_MODE_ON_AFTER_2S,
+	OUT_AUX_MODE_ON_AFTER_5S,
+	OUT_AUX_MODE_ON_AFTER_10S
+} out_aux_mode;
+
 typedef enum {
 	FOC_SENSOR_MODE_SENSORLESS = 0,
 	FOC_SENSOR_MODE_ENCODER,
@@ -902,6 +913,8 @@ typedef struct {
     int tachometer;
     int tachometer_abs;
     mc_fault_code fault_code;
+    float pid_pos;
+    uint8_t vesc_id;
 } mc_values;
 
 typedef enum {
@@ -924,6 +937,13 @@ typedef enum {
 	MOTOR_CONTROL_RPM,
 	MOTOR_CONTROL_POS
 } motor_control_mode;
+
+typedef enum {
+	CAN_BAUD_125K = 0,
+	CAN_BAUD_250K,
+	CAN_BAUD_500K,
+	CAN_BAUD_1M
+} CAN_BAUD;
 
 typedef struct {
 	// Switching and drive
@@ -951,6 +971,7 @@ typedef struct {
 	float l_temp_fet_end;
 	float l_temp_motor_start;
 	float l_temp_motor_end;
+	float l_temp_accel_dec;
 	float l_min_duty;
 	float l_max_duty;
 	float l_watt_max;
@@ -999,19 +1020,23 @@ typedef struct {
 	uint8_t foc_hall_table[8];
 	float foc_sl_erpm;
 	bool foc_sample_v0_v7;
+	bool foc_sample_high_current;
 	float foc_sat_comp;
 	bool foc_temp_comp;
 	float foc_temp_comp_base_temp;
+	float foc_current_filter_const;
 	// Speed PID
 	float s_pid_kp;
 	float s_pid_ki;
 	float s_pid_kd;
+	float s_pid_kd_filter;
 	float s_pid_min_erpm;
 	bool s_pid_allow_braking;
 	// Pos PID
 	float p_pid_kp;
 	float p_pid_ki;
 	float p_pid_kd;
+	float p_pid_kd_filter;
 	float p_pid_ang_div;
 	// Current controller
 	float cc_startup_boost_duty;
@@ -1030,6 +1055,8 @@ typedef struct {
 	float m_bldc_f_sw_min;
 	float m_bldc_f_sw_max;
 	float m_dc_f_sw;
+	float m_ntc_motor_beta;
+	out_aux_mode m_out_aux_mode;
 } mc_configuration;
 
 // Applications to use
@@ -1074,6 +1101,7 @@ typedef struct {
 	bool median_filter;
 	bool safe_start;
 	float throttle_exp;
+	float throttle_exp_brake;
 	thr_exp_mode throttle_exp_mode;
 	float ramp_time_pos;
 	float ramp_time_neg;
@@ -1088,12 +1116,16 @@ typedef enum {
 	ADC_CTRL_TYPE_CURRENT,
 	ADC_CTRL_TYPE_CURRENT_REV_CENTER,
 	ADC_CTRL_TYPE_CURRENT_REV_BUTTON,
+	ADC_CTRL_TYPE_CURRENT_REV_BUTTON_BRAKE_ADC,
 	ADC_CTRL_TYPE_CURRENT_NOREV_BRAKE_CENTER,
 	ADC_CTRL_TYPE_CURRENT_NOREV_BRAKE_BUTTON,
 	ADC_CTRL_TYPE_CURRENT_NOREV_BRAKE_ADC,
 	ADC_CTRL_TYPE_DUTY,
 	ADC_CTRL_TYPE_DUTY_REV_CENTER,
-	ADC_CTRL_TYPE_DUTY_REV_BUTTON
+	ADC_CTRL_TYPE_DUTY_REV_BUTTON,
+	ADC_CTRL_TYPE_PID,
+	ADC_CTRL_TYPE_PID_REV_CENTER,
+	ADC_CTRL_TYPE_PID_REV_BUTTON
 } adc_control_type;
 
 typedef struct {
@@ -1111,7 +1143,10 @@ typedef struct {
 	bool voltage_inverted;
 	bool voltage2_inverted;
 	float throttle_exp;
+	float throttle_exp_brake;
 	thr_exp_mode throttle_exp_mode;
+	float ramp_time_pos;
+	float ramp_time_neg;
 	bool multi_esc;
 	bool tc;
 	float tc_max_diff;
@@ -1132,6 +1167,7 @@ typedef struct {
 	float ramp_time_neg;
 	float stick_erpm_per_s_in_cc;
 	float throttle_exp;
+	float throttle_exp_brake;
 	thr_exp_mode throttle_exp_mode;
 	bool multi_esc;
 	bool tc;
@@ -1149,7 +1185,8 @@ typedef enum {
 	NRF_POWER_M18DBM = 0,
 	NRF_POWER_M12DBM,
 	NRF_POWER_M6DBM,
-	NRF_POWER_0DBM
+	NRF_POWER_0DBM,
+  NRF_POWER_OFF
 } NRF_POWER;
 
 typedef enum {
@@ -1201,6 +1238,7 @@ typedef struct {
 	float timeout_brake_current;
 	bool send_can_status;
 	uint32_t send_can_status_rate_hz;
+	CAN_BAUD can_baud_rate;
 
 	// Application to use
 	app_use app_to_use;

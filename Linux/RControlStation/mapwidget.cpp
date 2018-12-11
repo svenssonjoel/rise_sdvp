@@ -20,6 +20,7 @@
 #include <qmath.h>
 #include <QPrinter>
 #include <QPrintEngine>
+#include <QTime>
 
 #include "mapwidget.h"
 #include "utility.h"
@@ -165,6 +166,8 @@ MapWidget::MapWidget(QWidget *parent) : QWidget(parent)
     mTraceMinSpaceGps = 0.05;
     mInfoTraceNow = 0;
     mAnchorMode = false;
+    mDrawRouteText = true;
+    mDrawUwbTrace = false;
 
     mOsm = new OsmClient(this);
     mDrawOpenStreetmap = true;
@@ -181,14 +184,14 @@ MapWidget::MapWidget(QWidget *parent) : QWidget(parent)
     mInfoTraces.append(l);
 
     // Set this to the SP base station position for now
-    //    mRefLat = 57.71495867;
-    //    mRefLon = 12.89134921;
-    //    mRefHeight = 219.0;
+    mRefLat = 57.71495867;
+    mRefLon = 12.89134921;
+    mRefHeight = 219.0;
 
     // ASTA
-    mRefLat = 57.78100308;
-    mRefLon = 12.76925422;
-    mRefHeight = 253.76;
+//    mRefLat = 57.78100308;
+//    mRefLon = 12.76925422;
+//    mRefHeight = 253.76;
 
     // Home
     //    mRefLat = 57.57848470;
@@ -240,6 +243,8 @@ MapWidget::MapWidget(QWidget *parent) : QWidget(parent)
         delete p;
         mPixmaps.append(pix);
     }
+
+    grabGesture(Qt::PinchGesture);
 }
 
 CarInfo *MapWidget::getCarInfo(int car)
@@ -676,8 +681,14 @@ void MapWidget::mousePressEvent(QMouseEvent *e)
                     mRoutePointSelected = routeInd;
                     mRoutes[mRouteNow][routeInd].setXY(pos.getX(), pos.getY());
                 } else {
-                    mRoutes[mRouteNow].append(pos);
-                    emit routePointAdded(pos);
+                    if (mRoutes[mRouteNow].size() < 2 ||
+                            mRoutes[mRouteNow].last().getDistanceTo(pos) <
+                            mRoutes[mRouteNow].first().getDistanceTo(pos)) {
+                        mRoutes[mRouteNow].append(pos);
+                        emit routePointAdded(pos);
+                    } else {
+                        mRoutes[mRouteNow].prepend(pos);
+                    }
                 }
             } else if (e->buttons() & Qt::RightButton) {
                 if (routeFound) {
@@ -778,6 +789,50 @@ void MapWidget::wheelEvent(QWheelEvent *e)
     }
 
     updateClosestInfoPoint();
+}
+
+bool MapWidget::event(QEvent *event)
+{
+    if (event->type() == QEvent::Gesture) {
+        QGestureEvent *ge = static_cast<QGestureEvent*>(event);
+
+        if (QGesture *pinch = ge->gesture(Qt::PinchGesture)) {
+            QPinchGesture *pg = static_cast<QPinchGesture *>(pinch);
+
+            if (pg->changeFlags() & QPinchGesture::ScaleFactorChanged) {
+                mScaleFactor *= pg->scaleFactor();
+                mXOffset *= pg->scaleFactor();
+                mYOffset *= pg->scaleFactor();
+                update();
+            }
+
+            return true;
+        }
+    }
+
+    return QWidget::event(event);
+}
+
+bool MapWidget::getDrawRouteText() const
+{
+    return mDrawRouteText;
+}
+
+void MapWidget::setDrawRouteText(bool drawRouteText)
+{
+    mDrawRouteText = drawRouteText;
+    update();
+}
+
+bool MapWidget::getDrawUwbTrace() const
+{
+    return mDrawUwbTrace;
+}
+
+void MapWidget::setDrawUwbTrace(bool drawUwbTrace)
+{
+    mDrawUwbTrace = drawUwbTrace;
+    update();
 }
 
 double MapWidget::getTraceMinSpaceGps() const
@@ -1633,13 +1688,15 @@ void MapWidget::paint(QPainter &painter, int width, int height, bool highQuality
     }
 
     // Draw UWB trace for the selected car
-    pen.setWidthF(2.5 / mScaleFactor);
-    pen.setColor(Qt::green);
-    painter.setPen(pen);
-    painter.setTransform(drawTrans);
-    for (int i = 1;i < mCarTraceUwb.size();i++) {
-        painter.drawLine(mCarTraceUwb[i - 1].getX() * 1000.0, mCarTraceUwb[i - 1].getY() * 1000.0,
-                mCarTraceUwb[i].getX() * 1000.0, mCarTraceUwb[i].getY() * 1000.0);
+    if (mDrawUwbTrace) {
+        pen.setWidthF(2.5 / mScaleFactor);
+        pen.setColor(Qt::green);
+        painter.setPen(pen);
+        painter.setTransform(drawTrans);
+        for (int i = 1;i < mCarTraceUwb.size();i++) {
+            painter.drawLine(mCarTraceUwb[i - 1].getX() * 1000.0, mCarTraceUwb[i - 1].getY() * 1000.0,
+                    mCarTraceUwb[i].getX() * 1000.0, mCarTraceUwb[i].getY() * 1000.0);
+        }
     }
 
     // Draw routes
@@ -1689,7 +1746,7 @@ void MapWidget::paint(QPainter &painter, int width, int height, bool highQuality
             }
 
             // Draw text only for selected route
-            if (mRouteNow == rn) {
+            if (mRouteNow == rn && mDrawRouteText) {
                 QTime t = QTime::fromMSecsSinceStartOfDay(routeNow[i].getTime());
                 txt.sprintf("P: %d\n"
                             "%.1f km/h\n"
@@ -1800,9 +1857,11 @@ void MapWidget::paint(QPainter &painter, int width, int height, bool highQuality
         // Print data
         QTime t = QTime::fromMSecsSinceStartOfDay(carInfo.getTime());
         txt.sprintf("%s\n"
+                    "Sol: %s\n"
                     "(%.3f, %.3f, %.0f)\n"
                     "%02d:%02d:%02d:%03d",
                     carInfo.getName().toLocal8Bit().data(),
+                    carInfo.getLocationGps().getInfo().toLocal8Bit().data(),
                     pos.getX(), pos.getY(), angle,
                     t.hour(), t.minute(), t.second(), t.msec());
         pt_txt.setX(x + 120 + (car_w - 190) * ((cos(pos.getYaw()) + 1) / 2));
@@ -1810,7 +1869,7 @@ void MapWidget::paint(QPainter &painter, int width, int height, bool highQuality
         painter.setTransform(txtTrans);
         pt_txt = drawTrans.map(pt_txt);
         rect_txt.setCoords(pt_txt.x(), pt_txt.y() - 20,
-                           pt_txt.x() + 300, pt_txt.y() + 25);
+                           pt_txt.x() + 300, pt_txt.y() + 50);
         painter.drawText(rect_txt, txt);
     }
 

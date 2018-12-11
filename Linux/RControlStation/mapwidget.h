@@ -28,6 +28,7 @@
 #include <QList>
 #include <QInputDialog>
 #include <QTimer>
+#include <QPinchGesture>
 
 #include "locpoint.h"
 #include "carinfo.h"
@@ -123,6 +124,12 @@ public:
     void printPdf(QString path, int width = 0, int height = 0);
     void printPng(QString path, int width = 0, int height = 0);
 
+    bool getDrawRouteText() const;
+    void setDrawRouteText(bool drawRouteText);
+
+    bool getDrawUwbTrace() const;
+    void setDrawUwbTrace(bool drawUwbTrace);
+
 signals:
     void scaleChanged(double newScale);
     void offsetChanged(double newXOffset, double newYOffset);
@@ -136,11 +143,12 @@ private slots:
     void errorGetTile(QString reason);
 
 protected:
-    void paintEvent(QPaintEvent *event);
-    void mouseMoveEvent (QMouseEvent * e);
-    void mousePressEvent(QMouseEvent * e);
-    void mouseReleaseEvent(QMouseEvent * e);
-    void wheelEvent(QWheelEvent * e);
+    void paintEvent(QPaintEvent *event) override;
+    void mouseMoveEvent (QMouseEvent *e) override;
+    void mousePressEvent(QMouseEvent *e) override;
+    void mouseReleaseEvent(QMouseEvent *e) override;
+    void wheelEvent(QWheelEvent *e) override;
+    bool event(QEvent *event) override;
 
 private:
     QList<CarInfo> mCarInfo;
@@ -190,6 +198,8 @@ private:
     double mTraceMinSpaceGps;
     QList<QPixmap> mPixmaps;
     bool mAnchorMode;
+    bool mDrawRouteText;
+    bool mDrawUwbTrace;
 
     void updateClosestInfoPoint();
     int drawInfoPoints(QPainter &painter, const QList<LocPoint> &pts,

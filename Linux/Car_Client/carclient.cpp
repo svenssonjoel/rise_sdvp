@@ -24,6 +24,7 @@
 #include <unistd.h>
 #include <QEventLoop>
 #include <QCoreApplication>
+#include <QNetworkInterface>
 #include "rtcm3_simple.h"
 
 namespace {
@@ -62,6 +63,7 @@ CarClient::CarClient(QObject *parent) : QObject(parent)
     mLogFlushTimer = new QTimer(this);
     mLogFlushTimer->start(2000);
     mRtklibRunning = false;
+    mBatteryCells = 10;
 
     mHostAddress = QHostAddress("0.0.0.0");
     mUdpPort = 0;
@@ -111,6 +113,8 @@ CarClient::CarClient(QObject *parent) : QObject(parent)
     connect(mUblox, SIGNAL(rxRawx(ubx_rxm_rawx)), this, SLOT(rxRawx(ubx_rxm_rawx)));
     connect(mTcpServer->packet(), SIGNAL(packetReceived(QByteArray&)),
             this, SLOT(tcpRx(QByteArray&)));
+    connect(mTcpServer, SIGNAL(connectionChanged(bool,QString)),
+            this, SLOT(tcpConnectionChanged(bool,QString)));
     connect(mRtcmClient, SIGNAL(rtcmReceived(QByteArray,int,bool)),
             this, SLOT(rtcmReceived(QByteArray,int,bool)));
     connect(mPacketInterface, SIGNAL(logEthernetReceived(quint8,QByteArray)),
@@ -378,11 +382,77 @@ void CarClient::setSendRtcmBasePos(bool send, double lat, double lon, double hei
     mRtcmBaseHeight = height;
 }
 
+void CarClient::rebootSystem(bool powerOff)
+{
+    // https://askubuntu.com/questions/159007/how-do-i-run-specific-sudo-commands-without-a-password
+    QStringList args;
+    QString cmd = "sudo";
+
+    if (powerOff) {
+        args << "shutdown" << "-h" << "now";
+    } else {
+        args << "reboot";
+    }
+
+    QProcess process;
+    process.setEnvironment(QProcess::systemEnvironment());
+    process.start(cmd, args);
+    waitProcess(process);
+
+    qApp->quit();
+}
+
+QVariantList CarClient::getNetworkAddresses()
+{
+    QVariantList res;
+
+    for(QHostAddress a: QNetworkInterface::allAddresses()) {
+        if(!a.isLoopback()) {
+            if (a.protocol() == QAbstractSocket::IPv4Protocol) {
+                res << a.toString();
+            }
+        }
+    }
+
+    return res;
+}
+
+int CarClient::getBatteryCells()
+{
+    return mBatteryCells;
+}
+
+void CarClient::setBatteryCells(int cells)
+{
+    mBatteryCells = cells;
+}
+
+void CarClient::addSimulatedCar(int id)
+{
+    CarSim *car = new CarSim(this);
+    car->setId(id);
+    connect(car, SIGNAL(dataToSend(QByteArray)), this, SLOT(processCarData(QByteArray)));
+    mSimulatedCars.append(car);
+}
+
+CarSim *CarClient::getSimulatedCar(int id)
+{
+    CarSim *sim = 0;
+
+    for (CarSim *s: mSimulatedCars) {
+        if (s->id() == id) {
+            sim = s;
+            break;
+        }
+    }
+
+    return sim;
+}
+
 void CarClient::serialDataAvailable()
 {
     while (mSerialPort->bytesAvailable() > 0) {
-        QByteArray data = mSerialPort->readAll();
-        mPacketInterface->processData(data);
+        processCarData(mSerialPort->readAll());
     }
 }
 
@@ -447,6 +517,10 @@ void CarClient::packetDataToSend(QByteArray &data)
 {
     if (mSerialPort->isOpen()) {
         mSerialPort->writeData(data);
+    }
+
+    for (CarSim *s: mSimulatedCars) {
+        s->processData(data);
     }
 }
 
@@ -526,15 +600,17 @@ void CarClient::readPendingDatagrams()
 
 void CarClient::carPacketRx(quint8 id, CMD_PACKET cmd, const QByteArray &data)
 {
-    mCarId = id;
+    (void)cmd;
 
-    if (QString::compare(mHostAddress.toString(), "0.0.0.0") != 0) {
-        if (cmd != CMD_LOG_LINE_USB) {
+    if (id != 254) {
+        mCarId = id;
+
+        if (QString::compare(mHostAddress.toString(), "0.0.0.0") != 0) {
             mUdpSocket->writeDatagram(data, mHostAddress, mUdpPort);
         }
-    }
 
-    mTcpServer->packet()->sendPacket(data);
+        mTcpServer->packet()->sendPacket(data);
+    }
 }
 
 void CarClient::logLineUsbReceived(quint8 id, QString str)
@@ -625,6 +701,15 @@ void CarClient::tcpRx(QByteArray &data)
     mPacketInterface->sendPacket(data);
 }
 
+void CarClient::tcpConnectionChanged(bool connected, QString address)
+{
+    if (connected) {
+        qDebug() << "TCP connection from" << address << "accepted";
+    } else {
+        qDebug() << "Disconnected TCP from" << address;
+    }
+}
+
 void CarClient::rtcmReceived(QByteArray data, int type, bool sync)
 {
     (void)type;
@@ -638,24 +723,9 @@ void CarClient::logEthernetReceived(quint8 id, QByteArray data)
     mLogBroadcaster->broadcastData(data);
 }
 
-void CarClient::rebootSystem(bool powerOff)
+void CarClient::processCarData(QByteArray data)
 {
-    // https://askubuntu.com/questions/159007/how-do-i-run-specific-sudo-commands-without-a-password
-    QStringList args;
-    QString cmd = "sudo";
-
-    if (powerOff) {
-        args << "shutdown" << "-h" << "now";
-    } else {
-        args << "reboot";
-    }
-
-    QProcess process;
-    process.setEnvironment(QProcess::systemEnvironment());
-    process.start(cmd, args);
-    waitProcess(process);
-
-    qApp->quit();
+    mPacketInterface->processData(data);
 }
 
 bool CarClient::setUnixTime(qint64 t)

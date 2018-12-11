@@ -301,7 +301,10 @@ bool PacketInterface::sendPacketAck(const unsigned char *data, unsigned int len_
         connect(this, SIGNAL(ackReceived(quint8, CMD_PACKET, QString)), &loop, SLOT(quit()));
         connect(&timeoutTimer, SIGNAL(timeout()), &loop, SLOT(quit()));
 
-        sendPacket(buffer, len_packet);
+        QTimer::singleShot(0, [this, buffer, len_packet]() {
+            sendPacket(buffer, len_packet);
+        });
+
         loop.exec();
 
         if (timeoutTimer.isActive()) {
@@ -443,6 +446,7 @@ void PacketInterface::processPacket(const unsigned char *data, int len)
         conf.car.yaw_imu_gain = utility::buffer_get_double32_auto(data, &ind);
         conf.car.disable_motor = data[ind++];
         conf.car.simulate_motor = data[ind++];
+        conf.car.clamp_imu_yaw_stationary = data[ind++];
 
         conf.car.gear_ratio = utility::buffer_get_double32_auto(data, &ind);
         conf.car.wheel_diam = utility::buffer_get_double32_auto(data, &ind);
@@ -897,6 +901,7 @@ bool PacketInterface::setConfiguration(quint8 id, MAIN_CONFIG &conf, int retries
     utility::buffer_append_double32_auto(mSendBuffer, conf.car.yaw_imu_gain, &send_index);
     mSendBuffer[send_index++] = conf.car.disable_motor;
     mSendBuffer[send_index++] = conf.car.simulate_motor;
+    mSendBuffer[send_index++] = conf.car.clamp_imu_yaw_stationary;
 
     utility::buffer_append_double32_auto(mSendBuffer, conf.car.gear_ratio, &send_index);
     utility::buffer_append_double32_auto(mSendBuffer, conf.car.wheel_diam, &send_index);
@@ -1048,7 +1053,8 @@ bool PacketInterface::getRoutePart(quint8 id,
     quint8 idRx;
 
     auto conn = connect(this, &PacketInterface::routePartReceived,
-                        [&routeLen, &points, &idRx](quint8 id, int len, const QList<LocPoint> &route){
+                        [&routeLen, &points, &idRx](quint8 id, int len,
+                        const QList<LocPoint> &route){
         idRx = id;
         routeLen = len;
         points.append(route);
@@ -1063,7 +1069,10 @@ bool PacketInterface::getRoutePart(quint8 id,
         utility::buffer_append_int32(mSendBuffer, first, &send_index);
         mSendBuffer[send_index++] = num;
 
-        sendPacket(mSendBuffer, send_index);
+        QTimer::singleShot(0, [this, &send_index]() {
+            sendPacket(mSendBuffer, send_index);
+        });
+
         res = waitSignal(this, SIGNAL(routePartReceived(quint8,int,QList<LocPoint>)), 200);
 
         if (res) {

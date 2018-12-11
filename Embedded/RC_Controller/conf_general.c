@@ -118,6 +118,7 @@ void conf_general_get_default_main_config(MAIN_CONFIG *conf) {
 	conf->car.yaw_imu_gain = 0.5;
 	conf->car.disable_motor = false;
 	conf->car.simulate_motor = false;
+	conf->car.clamp_imu_yaw_stationary = true;
 
 	conf->car.gear_ratio = (1.0 / 3.0) * (21.0 / 37.0);
 	conf->car.wheel_diam = 0.11;
@@ -234,6 +235,15 @@ void conf_general_get_default_main_config(MAIN_CONFIG *conf) {
 	conf->mag_cal_zx = -0.0046;
 	conf->mag_cal_zy = 0.0539;
 	conf->mag_cal_zz = 0.9869;
+#endif
+
+	// Only the SLU testbot for now
+#if HAS_DIFF_STEERING
+	conf->car.gear_ratio = 1.0;
+	conf->car.axis_distance = 0.5;
+	conf->car.wheel_diam = 0.3;
+	conf->car.motor_poles = 22.0;
+	conf->gps_ant_x = 0.5;
 #endif
 
 }

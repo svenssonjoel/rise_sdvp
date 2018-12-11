@@ -1,13 +1,21 @@
+# Build GUI
+#DEFINES += HAS_GUI
+
 QT += core
-QT -= gui
+QT += widgets
 QT += network
 QT += serialport
+
+contains(DEFINES, HAS_GUI) {
+    QT += quick
+    QT += quickcontrols2
+    QT += gui
+}
 
 CONFIG += c++11
 
 TARGET = Car_Client
 CONFIG += console
-CONFIG -= app_bundle
 
 TEMPLATE = app
 
@@ -24,8 +32,10 @@ SOURCES += main.cpp \
     packet.cpp \
     tcpserversimple.cpp \
     chronos.cpp \
-    vbytearray.cpp \
-    rtcmclient.cpp
+    rtcmclient.cpp \
+    chronoscomm.cpp \
+    vbytearrayle.cpp \
+    vbytearray.cpp
 
 HEADERS += \
     packetinterface.h \
@@ -41,6 +51,12 @@ HEADERS += \
     packet.h \
     tcpserversimple.h \
     chronos.h \
-    vbytearray.h \
-    rtcmclient.h
+    rtcmclient.h \
+    chronoscomm.h \
+    vbytearrayle.h \
+    vbytearray.h
 
+RESOURCES += \
+    res.qrc
+
+include(carsim/carsim.pri)

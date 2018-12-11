@@ -2117,7 +2117,7 @@
                    <x>0</x>
                    <y>0</y>
                    <width>210</width>
-                   <height>643</height>
+                   <height>693</height>
                   </rect>
                  </property>
                  <layout class="QVBoxLayout" name="verticalLayout_15">
@@ -2177,6 +2177,23 @@
                        </property>
                        <property name="checked">
                         <bool>false</bool>
+                       </property>
+                      </widget>
+                     </item>
+                     <item>
+                      <widget class="QCheckBox" name="mapDrawRouteTextBox">
+                       <property name="text">
+                        <string>Draw Route Text</string>
+                       </property>
+                       <property name="checked">
+                        <bool>true</bool>
+                       </property>
+                      </widget>
+                     </item>
+                     <item>
+                      <widget class="QCheckBox" name="mapDrawUwbTraceBox">
+                       <property name="text">
+                        <string>Draw UWB Trace</string>
                        </property>
                       </widget>
                      </item>
@@ -2793,6 +2810,7 @@
      <string>Tests</string>
     </property>
     <addaction name="actionTestIntersection"/>
+    <addaction name="actionGPSSimulator"/>
    </widget>
    <widget class="QMenu" name="menuChronos">
     <property name="title">
@@ -2901,6 +2919,15 @@
    </property>
    <property name="text">
     <string>Save Routes with IDs...</string>
+   </property>
+  </action>
+  <action name="actionGPSSimulator">
+   <property name="icon">
+    <iconset resource="resources.qrc">
+     <normaloff>:/models/Icons/Satellite-96.png</normaloff>:/models/Icons/Satellite-96.png</iconset>
+   </property>
+   <property name="text">
+    <string>GPS Simulator</string>
    </property>
   </action>
  </widget>

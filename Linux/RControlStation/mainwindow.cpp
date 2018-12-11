@@ -27,6 +27,7 @@
 #include <QXmlStreamWriter>
 #include <QXmlStreamReader>
 #include <QStringList>
+#include <QElapsedTimer>
 
 #include "utility.h"
 
@@ -91,6 +92,8 @@ MainWindow::MainWindow(QWidget *parent) :
     mNmea = new NmeaServer(this);
     mUdpSocket = new QUdpSocket(this);
     mTcpSocket = new QTcpSocket(this);
+    mTcpSocket->setSocketOption(QAbstractSocket::LowDelayOption, true);
+    mUdpSocket->setSocketOption(QAbstractSocket::LowDelayOption, true);
 
     mIntersectionTest = new IntersectionTest(this);
     mIntersectionTest->setCars(&mCars);
@@ -98,6 +101,11 @@ MainWindow::MainWindow(QWidget *parent) :
     mIntersectionTest->setPacketInterface(mPacketInterface);
     connect(ui->nComWidget, SIGNAL(dataRx(ncom_data)),
             mIntersectionTest, SLOT(nComRx(ncom_data)));
+
+#ifdef HAS_LIME_SDR
+    mGpsSim = new GpsSim(this);
+    mGpsSim->setMap(ui->mapWidget);
+#endif
 
     mKeyUp = false;
     mKeyDown = false;
@@ -438,6 +446,11 @@ void MainWindow::timerSlot()
 
 void MainWindow::showStatusInfo(QString info, bool isGood)
 {
+    if (mStatusLabel->text() == info) {
+        mStatusInfoTime = 80;
+        return;
+    }
+
     if (isGood) {
         mStatusLabel->setStyleSheet("QLabel { background-color : lightgreen; color : black; }");
     } else {
@@ -512,13 +525,8 @@ void MainWindow::rtcmReceived(QByteArray data)
 
 void MainWindow::rtcmRefPosGet()
 {
-    double lat, lon, height;
-    if (ui->baseStationWidget->getAvgPosLlh(lat, lon, height) > 0) {
-        ui->rtcmWidget->setRefPos(lat, lon, height);
-    } else {
-        QMessageBox::warning(this, "Reference Position",
-                             "No samples collected yet.");
-    }
+    QMessageBox::warning(this, "Reference Position",
+                         "Not implemented yet");
 }
 
 void MainWindow::pingRx(int time, QString msg)
@@ -1091,6 +1099,9 @@ void MainWindow::on_mapUploadRouteButton_clicked()
         ok = mPacketInterface->clearRoute(car);
     }
 
+    QElapsedTimer timer;
+    timer.start();
+
     if (ok) {
         int ind = 0;
         for (ind = 0;ind < len;ind += 5) {
@@ -1107,7 +1118,10 @@ void MainWindow::on_mapUploadRouteButton_clicked()
                 break;
             }
 
-            ui->mapUploadRouteProgressBar->setValue((100 * (ind + 5)) / len);
+            if (timer.elapsed() >= 20) {
+                timer.restart();
+                ui->mapUploadRouteProgressBar->setValue((100 * (ind + 5)) / len);
+            }
         }
     }
 
@@ -1125,7 +1139,7 @@ void MainWindow::on_mapGetRouteButton_clicked()
 {
     if (!mSerialPort->isOpen() && !mPacketInterface->isUdpConnected() && !mTcpSocket->isOpen()) {
         QMessageBox::warning(this, "Get route",
-                             "Serial port not connected.");
+                             "Car not connected.");
         return;
     }
 
@@ -1135,9 +1149,15 @@ void MainWindow::on_mapGetRouteButton_clicked()
     int routeLen;
     bool ok = mPacketInterface->getRoutePart(ui->mapCarBox->value(), route.size(), 10, route, routeLen);
 
+    QElapsedTimer timer;
+    timer.start();
+
     while (route.size() < routeLen && ok) {
         ok = mPacketInterface->getRoutePart(ui->mapCarBox->value(), route.size(), 10, route, routeLen);
-        ui->mapUploadRouteProgressBar->setValue((100 * route.size()) / routeLen);
+        if (timer.elapsed() >= 20) {
+            timer.restart();
+            ui->mapUploadRouteProgressBar->setValue((100 * route.size()) / routeLen);
+        }
     }
 
     while (route.size() > routeLen) {
@@ -1148,7 +1168,7 @@ void MainWindow::on_mapGetRouteButton_clicked()
 
     if (ok) {
         if (route.size() > 0) {
-            ui->mapWidget->addRoute(route);
+            ui->mapWidget->setRoute(route);
             ui->mapUploadRouteProgressBar->setValue(100);
             showStatusInfo("GetRoute OK", true);
         } else {
@@ -1191,9 +1211,19 @@ void MainWindow::on_mapOffButton_clicked()
 void MainWindow::on_mapUpdateSpeedButton_clicked()
 {
     QList<LocPoint> route = ui->mapWidget->getRoute();
+    qint32 timeAcc = 0;
 
     for (int i = 0;i < route.size();i++) {
-        route[i].setSpeed(ui->mapRouteSpeedBox->value() / 3.6);
+        double speed = ui->mapRouteSpeedBox->value() / 3.6;
+        route[i].setSpeed(speed);
+
+        if (i == 0) {
+            route[i].setTime(0);
+        } else {
+            double dist = route[i].getDistanceTo(route[i - 1]);
+            timeAcc += (dist / speed) * 1000.0;
+            route[i].setTime(timeAcc);
+        }
     }
 
     ui->mapWidget->setRoute(route);
@@ -1979,4 +2009,25 @@ void MainWindow::saveRoutes(bool withId)
     stream.writeEndDocument();
     file.close();
     showStatusInfo("Saved routes", true);
+}
+
+void MainWindow::on_mapDrawRouteTextBox_toggled(bool checked)
+{
+    ui->mapWidget->setDrawRouteText(checked);
+}
+
+void MainWindow::on_actionGPSSimulator_triggered()
+{
+#ifdef HAS_LIME_SDR
+    mGpsSim->show();
+#else
+    QMessageBox::warning(this, "GPS Simulator",
+                         "This version of RControlStation is not built with LIME SDR support, which "
+                         "is required for the GPS simulator.");
+#endif
+}
+
+void MainWindow::on_mapDrawUwbTraceBox_toggled(bool checked)
+{
+    ui->mapWidget->setDrawUwbTrace(checked);
 }

@@ -10,6 +10,8 @@ QT       += printsupport
 QT       += serialport
 QT       += network
 QT       += opengl
+QT       += quick
+QT       += quickcontrols2
 
 CONFIG   += c++11
 
@@ -24,6 +26,9 @@ unix:!macx {
 
 # OpenGL support
 DEFINES += HAS_OPENGL
+
+# Lime SDR support
+#DEFINES += HAS_LIME_SDR
 
 TARGET = RControlStation
 TEMPLATE = app
@@ -147,6 +152,13 @@ contains(DEFINES, HAS_JOYSTICK) {
 contains(DEFINES, HAS_OPENGL) {
     SOURCES += orientationwidget.cpp
     HEADERS += orientationwidget.h
+}
+
+contains(DEFINES, HAS_LIME_SDR) {
+    SOURCES += gpssim.cpp gpsgen.cpp limesdr.cpp
+    HEADERS += gpssim.h gpsgen.h limesdr.h
+    FORMS += gpssim.ui
+    LIBS += -lLimeSuite
 }
 
 RESOURCES += \
