@@ -166,7 +166,7 @@ public:
     static quint32 gpsMsOfWeekToUtcToday(quint64 time);
 
 signals:
-    void connectionChanged(bool connected);
+    void connectionChanged(bool connected, QString address);
     void dotmRx(chronos_traj traj); // QVector<chronos_dotm_pt> dotm);
     void heabRx(chronos_heab heab);
     void osemRx(chronos_osem osem);
@@ -178,7 +178,7 @@ public slots:
 
 private slots:
     void tcpRx(QByteArray data);
-    void tcpConnectionChanged(bool connected);
+    void tcpConnectionChanged(bool connected, QString address);
     void readPendingDatagrams();
 
     void tcpInputConnected();

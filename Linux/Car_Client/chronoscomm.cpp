@@ -26,6 +26,9 @@ ChronosComm::ChronosComm(QObject *parent) : QObject(parent)
     mUdpSocket = new QUdpSocket(this);
     mTcpSocket = new QTcpSocket(this);
 
+    mTcpSocket->setSocketOption(QAbstractSocket::LowDelayOption, true);
+    mUdpSocket->setSocketOption(QAbstractSocket::LowDelayOption, true);
+
     mUdpHostAddress = QHostAddress("0.0.0.0");
     mUdpPort = 0;
     mTransmitterId = 0;
@@ -33,8 +36,8 @@ ChronosComm::ChronosComm(QObject *parent) : QObject(parent)
 
     connect(mTcpServer, SIGNAL(dataRx(QByteArray)),
             this, SLOT(tcpRx(QByteArray)));
-    connect(mTcpServer, SIGNAL(connectionChanged(bool)),
-            this, SLOT(tcpConnectionChanged(bool)));
+    connect(mTcpServer, SIGNAL(connectionChanged(bool,QString)),
+            this, SLOT(tcpConnectionChanged(bool,QString)));
     connect(mUdpSocket, SIGNAL(readyRead()),
             this, SLOT(readPendingDatagrams()));
 }
@@ -427,6 +430,10 @@ void ChronosComm::tcpRx(QByteArray data)
         case 10:
             mTcpLen |= ((quint8)c) << 24;
             mTcpState++;
+            if (mTcpLen == 0) {
+                // Go directly to the checksum state
+                mTcpState++;
+            }
             break;
         case 11:
             mTcpData.append(c);
@@ -455,9 +462,9 @@ void ChronosComm::tcpRx(QByteArray data)
     }
 }
 
-void ChronosComm::tcpConnectionChanged(bool connected)
+void ChronosComm::tcpConnectionChanged(bool connected, QString address)
 {
-    emit connectionChanged(connected);
+    emit connectionChanged(connected, address);
 }
 
 void ChronosComm::readPendingDatagrams()
