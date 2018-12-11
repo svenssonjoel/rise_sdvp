@@ -19,8 +19,10 @@ Chronos::Chronos(QObject *parent) : QObject(parent)
             this, SLOT(startTimerSlot()));
     connect(mChronos, SIGNAL(connectionChanged(bool)),
             this, SLOT(connectionChanged(bool)));
-    connect(mChronos, SIGNAL(dotmRx(QVector<chronos_dotm_pt>)),
-            this, SLOT(processDotm(QVector<chronos_dotm_pt>)));
+    //connect(mChronos, SIGNAL(dotmRx(QVector<chronos_dotm_pt>)),
+    //        this, SLOT(processDotm(QVector<chronos_dotm_pt>)));
+    connect(mChronos, SIGNAL(dotmRx(chronos_traj)),
+            this, SLOT(processDotm(chronos_traj)));
     connect(mChronos, SIGNAL(heabRx(chronos_heab)),
             this, SLOT(processHeab(chronos_heab)));
     connect(mChronos, SIGNAL(osemRx(chronos_osem)),
@@ -102,10 +104,11 @@ void Chronos::stateReceived(quint8 id, CAR_STATE state)
     mChronos->sendMonr(monr);
 }
 
-void Chronos::processDotm(QVector<chronos_dotm_pt> path)
+void Chronos::processDotm(chronos_traj traj)
 {
     qDebug() << "DOTM RX";
 
+    QVector<chronos_dotm_pt> path = traj.dotm_pts;
     // Subsample points
     QVector<chronos_dotm_pt> path_reduced;
 

@@ -21,8 +21,10 @@
 
 ChronosComm::ChronosComm(QObject *parent) : QObject(parent)
 {
+    //qDebug() << "constructing";
     mTcpServer = new TcpServerSimple(this);
     mUdpSocket = new QUdpSocket(this);
+    mTcpSocket = new QTcpSocket(this);
 
     mUdpHostAddress = QHostAddress("0.0.0.0");
     mUdpPort = 0;
@@ -65,7 +67,9 @@ bool ChronosComm::startObject()
 
 bool ChronosComm::connectAsServer(QString address)
 {
+
     mTcpSocket->connectToHost(address, 53241);
+
     bool res = mTcpSocket->waitForConnected(2000);
 
     if (!res) {
@@ -91,6 +95,77 @@ void ChronosComm::closeConnection()
     mTcpSocket->close();
     mUdpSocket->close();
 }
+
+void ChronosComm::sendTraj(chronos_traj traj)
+{
+    qDebug() << "Sending TRAJ";
+
+    QVector<chronos_dotm_pt> points = traj.dotm_pts;
+
+    VByteArrayLe vb;
+    vb.vbAppendUint16(ISO_VALUE_ID_TRAJECTORY_ID);
+    vb.vbAppendUint16(2);
+    vb.vbAppendUint16(traj.traj_id);
+    vb.vbAppendUint16(ISO_VALUE_ID_TRAJECTORY_NAME);
+    vb.vbAppendUint16(64);
+
+    for (char c: traj.traj_name){
+        vb.vbAppendUint8((uint8_t)c);
+    }
+    vb.vbAppendUint16(ISO_VALUE_ID_TRAJECTORY_VERSION);
+    vb.vbAppendUint16(2);
+    vb.vbAppendUint16(traj.traj_ver);
+
+    //qDebug() << "Appending number of points: " << points.size();
+    for (chronos_dotm_pt pt: points) {
+        vb.vbAppendUint16(ISO_VALUE_ID_REL_TIME);
+        vb.vbAppendUint16(4);
+        vb.vbAppendUint32(pt.tRel); // TODO: Multiply with 4?
+        vb.vbAppendUint16(ISO_VALUE_ID_X_POS);
+        vb.vbAppendUint16(4);
+        vb.vbAppendDouble32(pt.x, 1e3);
+        vb.vbAppendUint16(ISO_VALUE_ID_Y_POS);
+        vb.vbAppendUint16(4);
+        vb.vbAppendDouble32(pt.y, 1e3);
+        vb.vbAppendUint16(ISO_VALUE_ID_Z_POS);
+        vb.vbAppendUint16(4);
+        vb.vbAppendDouble32(pt.z, 1e3);
+        vb.vbAppendUint16(ISO_VALUE_ID_HEADING);
+        vb.vbAppendUint16(2);
+        vb.vbAppendUint16(1e2 * pt.heading * 180.0 / M_PI);
+        vb.vbAppendUint16(ISO_VALUE_ID_LONG_SPEED);
+        vb.vbAppendUint16(2);
+        vb.vbAppendDouble16(pt.long_speed, 1e2);
+        vb.vbAppendUint16(ISO_VALUE_ID_LAT_SPEED);
+        vb.vbAppendUint16(2);
+        vb.vbAppendDouble16(pt.lat_speed, 1e2);
+        vb.vbAppendUint16(ISO_VALUE_ID_LONG_ACC);
+        vb.vbAppendUint16(2);
+        vb.vbAppendDouble16(pt.long_accel, 1e3);
+        vb.vbAppendUint16(ISO_VALUE_ID_LAT_ACC);
+        vb.vbAppendUint16(2);
+        vb.vbAppendDouble16(pt.lat_accel, 1e3);
+        vb.vbAppendUint16(ISO_VALUE_ID_CURVATURE);
+        vb.vbAppendUint16(4);
+        vb.vbAppendDouble32(pt.curvature, 3e4);
+    }
+
+    vb.vbAppendUint16(AUX_VALUE_ID_OBJECT_ID);
+    vb.vbAppendUint16(4);
+    vb.vbAppendUint32(traj.object_id);
+
+    mkChronosHeader(vb,
+                    mTransmitterId,
+                    mChronosSeqNum++,
+                    false,
+                    PROTOCOL_VERSION,
+                    ISO_MSG_DOTM);
+
+    appendChronosChecksum(vb);
+
+    mTcpSocket->write(vb);
+}
+
 
 void ChronosComm::sendDotm(QVector<chronos_dotm_pt> dotm)
 {
@@ -167,10 +242,10 @@ void ChronosComm::sendOsem(chronos_osem osem)
 
     vb.vbAppendUint16(ISO_VALUE_ID_LAT);
     vb.vbAppendUint16(6);
-    vb.vbAppendUint48((quint64)(osem.lat * 1e7));
+    vb.vbAppendUint48((quint64)(osem.lat * 1e10)); //1e7
     vb.vbAppendUint16(ISO_VALUE_ID_LON);
     vb.vbAppendUint16(6);
-    vb.vbAppendUint48((quint64)(osem.lon * 1e7));
+    vb.vbAppendUint48((quint64)(osem.lon * 1e10)); //1e7
     vb.vbAppendUint16(ISO_VALUE_ID_ALT);
     vb.vbAppendUint16(4);
     vb.vbAppendUint32((quint32)(osem.alt * 1e2));
@@ -220,7 +295,7 @@ void ChronosComm::sendStrt(chronos_strt strt)
     vb.vbAppendUint32(strt.gps_ms_of_week * 4);
     vb.vbAppendUint16(ISO_VALUE_ID_GPS_WEEK);
     vb.vbAppendUint16(2);
-    vb.vbAppendUint32(strt.gps_week);
+    vb.vbAppendUint16(strt.gps_week);
 
     mkChronosHeader(vb,
                     mTransmitterId,
@@ -293,6 +368,8 @@ quint32 ChronosComm::gpsMsOfWeekToUtcToday(quint64 time)
 
 void ChronosComm::tcpRx(QByteArray data)
 {
+    //qDebug() << "TCP RX";
+
     for (char c: data) {
         switch (mTcpState) {
         case 0: // first byte of sync word
@@ -366,6 +443,7 @@ void ChronosComm::tcpRx(QByteArray data)
             mTcpState = 0;
 
             if (mTcpChecksum == 0) {
+                //qDebug() << "TCP Message length: " << mTcpLen;
                 decodeMsg(mTcpType, mTcpLen, mTcpData);
             } else {
                 qWarning() << "Invalid checksum";
@@ -384,7 +462,8 @@ void ChronosComm::tcpConnectionChanged(bool connected)
 
 void ChronosComm::readPendingDatagrams()
 {
-    while (mUdpSocket->hasPendingDatagrams()) {
+
+      while (mUdpSocket->hasPendingDatagrams()) {
         QByteArray datagram;
         datagram.resize(mUdpSocket->pendingDatagramSize());
 
@@ -431,7 +510,9 @@ void ChronosComm::tcpInputDisconnected()
 
 void ChronosComm::tcpInputDataAvailable()
 {
+    //qDebug() << "TCPINPUT: " << mTcpSocket->bytesAvailable();
     while (mTcpSocket->bytesAvailable() > 0) {
+        //qDebug() << "GOING INTO tcpRx";
         tcpRx(mTcpSocket->readAll());
     }
 }
@@ -472,12 +553,16 @@ void ChronosComm::appendChronosChecksum(VByteArrayLe &vb)
 bool ChronosComm::decodeMsg(quint16 type, quint32 len, QByteArray payload)
 {
     (void)len;
+    int i = 0;
 
     VByteArrayLe vb(payload);
 
     switch (type) {
     case ISO_MSG_DOTM: {
         qDebug() << "decoding DOTM";
+
+        chronos_traj traj;
+
         QVector<chronos_dotm_pt> path;
 
         QVector<int> ids;
@@ -487,7 +572,10 @@ bool ChronosComm::decodeMsg(quint16 type, quint32 len, QByteArray payload)
         while (!vb.isEmpty()) {
             quint16 value_id = vb.vbPopFrontUint16();
             quint16 value_len = vb.vbPopFrontUint16();
+            //qDebug() << "Value_id: " << value_id;
+            //qDebug() << "Value_len: " << value_len;
 
+            // Problem: Skippar lägga till sista punkten
             if (ids.indexOf(value_id) >= 0) {
                 path.append(pt);
                 memset(&pt, 0, sizeof(pt));
@@ -498,42 +586,75 @@ bool ChronosComm::decodeMsg(quint16 type, quint32 len, QByteArray payload)
 
             switch (value_id) {
             case ISO_VALUE_ID_REL_TIME:
-                pt.tRel = vb.vbPopFrontUint32(); // TODO: Divide by 4?
+                pt.tRel = vb.vbPopFrontUint32(); // TODO: Divide by 4? (Not sure, time seems to match what I get form Chronos Serv)
+                //qDebug() << "tRel: " << pt.tRel;
                 break;
             case ISO_VALUE_ID_X_POS:
                 pt.x = vb.vbPopFrontDouble32(1e3);
+                //qDebug() << "X: " << pt.x;
                 break;
             case ISO_VALUE_ID_Y_POS:
                 pt.y = vb.vbPopFrontDouble32(1e3);
+                //qDebug() << "Y: " << pt.y;
                 break;
             case ISO_VALUE_ID_Z_POS:
                 pt.z = vb.vbPopFrontDouble32(1e3);
+                //qDebug() << "Z: " << pt.z;
                 break;
             case ISO_VALUE_ID_HEADING:
                 pt.heading = vb.vbPopFrontDouble16(1e1);
+                //qDebug() << "Heading: " << pt.heading;
                 break;
             case ISO_VALUE_ID_LONG_SPEED:
                 pt.long_speed = vb.vbPopFrontDouble16(1e2);
+                //qDebug() << "long_speed: " << pt.long_speed;
                 break;
             case ISO_VALUE_ID_LAT_SPEED:
                 pt.lat_speed = vb.vbPopFrontDouble16(1e2);
+                //qDebug() << "lat_speed: " << pt.lat_speed;
                 break;
             case ISO_VALUE_ID_LONG_ACC:
                 pt.long_accel = vb.vbPopFrontDouble16(1e3);
+                //qDebug() << "long_accel: " << pt.long_accel;
                 break;
             case ISO_VALUE_ID_LAT_ACC:
                 pt.lat_accel = vb.vbPopFrontDouble16(1e3);
+                //qDebug() << "lat_accel: " << pt.lat_accel;
                 break;
             case ISO_VALUE_ID_CURVATURE:
                 pt.curvature = vb.vbPopFrontDouble32(3e4);
+                //qDebug() << "CURVATURE: " << pt.curvature;
+                break;
+            case AUX_VALUE_ID_OBJECT_ID:
+                traj.object_id = vb.vbPopFrontUint32();
+                //qDebug() << "IP: " << traj.object_id;
+                break;
+            case ISO_VALUE_ID_TRAJECTORY_ID:
+                traj.traj_id = vb.vbPopFrontUint16();
+                break;
+            case ISO_VALUE_ID_TRAJECTORY_NAME:
+                for (i = 0; i < 64; i ++) {
+                    traj.traj_name.append((char)vb.vbPopFrontUint8());
+                }
+                break;
+            case ISO_VALUE_ID_TRAJECTORY_VERSION:
+                traj.traj_ver = vb.vbPopFrontUint16();
                 break;
             default:
+                //qDebug() << "DOTM: Unknown value id: " << value_id;
                 vb.remove(0, value_len);
                 break;
             }
         }
 
-        emit dotmRx(path);
+        if (ids.indexOf(ISO_VALUE_ID_X_POS) >= 0) { // MEGAHACK!
+            path.append(pt);
+            memset(&pt, 0, sizeof(pt));
+            ids.clear();
+        }
+        traj.dotm_pts = path;
+        qDebug() << "decoded traj of size: " << traj.dotm_pts.size();
+        emit dotmRx(traj);
     } break;
 
     case ISO_MSG_HEAB: {
@@ -551,10 +672,10 @@ bool ChronosComm::decodeMsg(quint16 type, quint32 len, QByteArray payload)
             quint16 value_len = vb.vbPopFrontUint16();
             switch (value_id) {
             case ISO_VALUE_ID_LAT:
-                osem.lat = vb.vbPopFrontDouble48(1e7);
+                osem.lat = vb.vbPopFrontDouble48(1e10); // 1e7
                 break;
             case ISO_VALUE_ID_LON:
-                osem.lon = vb.vbPopFrontDouble48(1e7);
+                osem.lon = vb.vbPopFrontDouble48(1e10); // 1e7
                 break;
             case ISO_VALUE_ID_ALT:
                 osem.alt = vb.vbPopFrontDouble32(1e2);
@@ -569,7 +690,7 @@ bool ChronosComm::decodeMsg(quint16 type, quint32 len, QByteArray payload)
                 osem.gps_ms_of_week = vb.vbPopFrontUint32() / 4;
                 break;
             default:
-                qDebug() << "OSEM: Unknown value id";
+                qDebug() << "OSEM: Unknown value id: " << value_id;
                 vb.remove(0, value_len);
                 break;
             }
@@ -590,7 +711,7 @@ bool ChronosComm::decodeMsg(quint16 type, quint32 len, QByteArray payload)
                 break;
 
             default:
-                qDebug() << "OSTM: Unknown value id";
+                qDebug() << "OSTM: Unknown value id: " << value_id;
                 vb.remove(0, value_len);
                 break;
             }
@@ -603,7 +724,7 @@ bool ChronosComm::decodeMsg(quint16 type, quint32 len, QByteArray payload)
         chronos_strt strt;
 
         while (!vb.isEmpty()) {
-            quint16 value_id    = vb.vbPopFrontUint16();
+            quint16 value_id  = vb.vbPopFrontUint16();
             quint16 value_len = vb.vbPopFrontUint16();
             switch(value_id) {
             case ISO_VALUE_ID_GPS_SEC_OF_WEEK:
@@ -614,7 +735,7 @@ bool ChronosComm::decodeMsg(quint16 type, quint32 len, QByteArray payload)
                 break;
 
             default:
-                qDebug() << "STRT: Unknown value id";
+                qDebug() << "STRT: Unknown value id: " << value_id;
                 vb.remove(0, value_len);
                 break;
             }

@@ -20,6 +20,7 @@
 
 #include <QObject>
 #include <QUdpSocket>
+#include <QTcpSocket>
 #include <QTimer>
 #include <vbytearrayle.h>
 #include <tcpserversimple.h>
@@ -36,6 +37,15 @@ typedef struct {
     double lat_accel;
     double curvature;
 } chronos_dotm_pt;
+
+// DOTM is now called traj
+typedef struct {
+    uint16_t traj_id;
+    QByteArray  traj_name;  // 64 bytes
+    uint16_t traj_ver;
+    QVector<chronos_dotm_pt> dotm_pts;
+    uint32_t object_id;
+} chronos_traj;
 
 typedef struct {
     double lat;
@@ -125,6 +135,12 @@ typedef struct {
 #define ISO_VALUE_ID_LAT_ACC            0x0051
 #define ISO_VALUE_ID_CURVATURE          0x0052
 
+#define ISO_VALUE_ID_TRAJECTORY_ID      0x0101
+#define ISO_VALUE_ID_TRAJECTORY_NAME    0x0102
+#define ISO_VALUE_ID_TRAJECTORY_VERSION 0x0103
+
+#define AUX_VALUE_ID_OBJECT_ID          0xA000
+
 class ChronosComm : public QObject
 {
     Q_OBJECT
@@ -134,6 +150,7 @@ public:
     bool connectAsServer(QString address);
     void closeConnection();
 
+    void sendTraj(chronos_traj traj);
     void sendDotm(QVector<chronos_dotm_pt> dotm);
     void sendHeab(chronos_heab heab);
     void sendOsem(chronos_osem osem);
@@ -150,7 +167,7 @@ public:
 
 signals:
     void connectionChanged(bool connected);
-    void dotmRx(QVector<chronos_dotm_pt> dotm);
+    void dotmRx(chronos_traj traj); // QVector<chronos_dotm_pt> dotm);
     void heabRx(chronos_heab heab);
     void osemRx(chronos_osem osem);
     void ostmRx(chronos_ostm ostm);
