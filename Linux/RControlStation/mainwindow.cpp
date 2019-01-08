@@ -86,6 +86,9 @@ MainWindow::MainWindow(QWidget *parent) :
 #ifdef HAS_JOYSTICK
     mJoystick = new Joystick(this);
     mJsType = JS_TYPE_HK;
+
+    connect(mJoystick, SIGNAL(buttonChanged(int,bool)),
+            this, SLOT(jsButtonChanged(int,bool)));
 #endif
 
     mPing = new Ping(this);
@@ -163,6 +166,26 @@ MainWindow::MainWindow(QWidget *parent) :
             qApp, SLOT(aboutQt()));
 
     on_serialRefreshButton_clicked();
+    on_mapCameraWidthBox_valueChanged(ui->mapCameraWidthBox->value());
+    on_mapCameraOpacityBox_valueChanged(ui->mapCameraOpacityBox->value());
+
+#if HAS_JOYSTICK
+    // Connect micronav joystick by default
+    bool connectJs = false;
+
+    {
+        Joystick js;
+        if (js.init(ui->jsPortEdit->text()) == 0) {
+            if (js.getName().contains("micronav one", Qt::CaseInsensitive)) {
+                connectJs = true;
+            }
+        }
+    }
+
+    if (connectJs) {
+        on_jsConnectButton_clicked();
+    }
+#endif
 
     qApp->installEventFilter(this);
 }
@@ -201,6 +224,15 @@ bool MainWindow::eventFilter(QObject *object, QEvent *e)
         QKeyEvent *keyEvent = static_cast<QKeyEvent *>(e);
         if (keyEvent->key() == Qt::Key_Escape) {
             on_stopButton_clicked();
+            return true;
+        }
+    }
+
+    // Handle F10 here as it won't be detected from the camera window otherwise.
+    if (e->type() == QEvent::KeyPress) {
+        QKeyEvent *keyEvent = static_cast<QKeyEvent *>(e);
+        if (keyEvent->key() == Qt::Key_F10) {
+            on_actionToggleCameraFullscreen_triggered();
             return true;
         }
     }
@@ -300,6 +332,19 @@ void MainWindow::timerSlot()
             js_mr_roll = -(double)mJoystick->getAxis(0) / 32768.0;
             js_mr_pitch = -(double)mJoystick->getAxis(1) / 32768.0;
             js_mr_yaw = -(double)mJoystick->getAxis(4) / 32768.0;
+            utility::truncate_number(&js_mr_thr, 0.0, 1.0);
+            utility::truncate_number_abs(&js_mr_roll, 1.0);
+            utility::truncate_number_abs(&js_mr_pitch, 1.0);
+            utility::truncate_number_abs(&js_mr_yaw, 1.0);
+        } else if (mJsType == JS_TYPE_MICRONAV_ONE) {
+            mThrottle = -(double)mJoystick->getAxis(1) / 32768.0;
+            deadband(mThrottle,0.1, 1.0);
+            mSteering = (double)mJoystick->getAxis(2) / 32768.0;
+
+            js_mr_thr = ((-(double)mJoystick->getAxis(1) / 32768.0) + 0.85) / 1.7;
+            js_mr_roll = (double)mJoystick->getAxis(2) / 32768.0;
+            js_mr_pitch = (double)mJoystick->getAxis(3) / 32768.0;
+            js_mr_yaw = (double)mJoystick->getAxis(0) / 32768.0;
             utility::truncate_number(&js_mr_thr, 0.0, 1.0);
             utility::truncate_number_abs(&js_mr_roll, 1.0);
             utility::truncate_number_abs(&js_mr_pitch, 1.0);
@@ -704,6 +749,47 @@ void MainWindow::tcpInputError(QAbstractSocket::SocketError socketError)
     mTcpSocket->close();
 }
 
+void MainWindow::jsButtonChanged(int button, bool pressed)
+{
+//    qDebug() << "JS BT:" << button << pressed;
+
+#if HAS_JOYSTICK
+    if (mJsType == JS_TYPE_MICRONAV_ONE) {
+        QWidget *fw = QApplication::focusWidget();
+
+        if (button == 1 && pressed) {
+            on_actionToggleFullscreen_triggered();
+        } else if (button == 3 && pressed) {
+            on_actionToggleCameraFullscreen_triggered();
+        } else if (button == 14 && pressed) {
+            if (fw) {
+                QKeyEvent *event = new QKeyEvent(
+                            QEvent::KeyPress, Qt::Key_Up, Qt::NoModifier);
+                QCoreApplication::postEvent(fw, event);
+            }
+        } else if (button == 10 && pressed) {
+            if (fw) {
+                QKeyEvent *event = new QKeyEvent(
+                            QEvent::KeyPress, Qt::Key_Down, Qt::NoModifier);
+                QCoreApplication::postEvent(fw, event);
+            }
+        } else  if (button == 13 && pressed) {
+            ui->mapWidget->removeLastRoutePoint();
+        }
+
+        if (mJoystick->getButton(12)) {
+            ui->mapWidget->setInteractionMode(MapWidget::InteractionModeShiftDown);
+        } else if (mJoystick->getButton(5)) {
+            ui->mapWidget->setInteractionMode(MapWidget::InteractionModeCtrlDown);
+        } else if (mJoystick->getButton(6)) {
+            ui->mapWidget->setInteractionMode(MapWidget::InteractionModeCtrlShiftDown);
+        } else {
+            ui->mapWidget->setInteractionMode(MapWidget::InteractionModeDefault);
+        }
+    }
+#endif
+}
+
 void MainWindow::on_carAddButton_clicked()
 {
     CarInterface *car = new CarInterface(this);
@@ -874,7 +960,6 @@ void MainWindow::on_jsConnectButton_clicked()
         qDebug() << "Buttons:" << mJoystick->numButtons();
         qDebug() << "Name:" << mJoystick->getName();
 
-
         if (mJoystick->getName().contains("Sony PLAYSTATION(R)3")) {
             mJsType = JS_TYPE_PS3;
             qDebug() << "Treating joystick as PS3 USB controller.";
@@ -883,6 +968,12 @@ void MainWindow::on_jsConnectButton_clicked()
             mJsType = JS_TYPE_PS4;
             qDebug() << "Treating joystick as PS4 USB controller.";
             showStatusInfo("PS4 USB joystick connected!", true);
+        } else if (mJoystick->getName().contains("micronav one", Qt::CaseInsensitive)) {
+            mJsType = JS_TYPE_MICRONAV_ONE;
+            qDebug() << "Treating joystick as Micronav One.";
+            showStatusInfo("Micronav One joystick connected!", true);
+            mJoystick->setRepeats(10, true);
+            mJoystick->setRepeats(14, true);
         } else {
             mJsType = JS_TYPE_HK;
             qDebug() << "Treating joystick as hobbyking simulator.";
@@ -2030,4 +2121,44 @@ void MainWindow::on_actionGPSSimulator_triggered()
 void MainWindow::on_mapDrawUwbTraceBox_toggled(bool checked)
 {
     ui->mapWidget->setDrawUwbTrace(checked);
+}
+
+void MainWindow::on_actionToggleFullscreen_triggered()
+{
+    if (isFullScreen()) {
+        showNormal();
+    } else {
+        showFullScreen();
+    }
+}
+
+void MainWindow::on_mapCameraWidthBox_valueChanged(double arg1)
+{
+    ui->mapWidget->setCameraImageWidth(arg1);
+}
+
+void MainWindow::on_mapCameraOpacityBox_valueChanged(double arg1)
+{
+    ui->mapWidget->setCameraImageOpacity(arg1);
+}
+
+void MainWindow::on_actionToggleCameraFullscreen_triggered()
+{
+    if (mCars.size() == 1) {
+        mCars[0]->toggleCameraFullscreen();
+    } else {
+        for (int i = 0;i < mCars.size();i++) {
+            if (mCars[i]->getId() == ui->mapCarBox->value()) {
+                mCars[i]->toggleCameraFullscreen();
+            }
+        }
+    }
+}
+
+void MainWindow::on_tabWidget_currentChanged(int index)
+{
+    // Focus on map widget when changing tab to it
+    if (index == 1) {
+        ui->mapWidget->setFocus();
+    }
 }

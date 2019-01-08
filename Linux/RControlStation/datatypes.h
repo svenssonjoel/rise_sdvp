@@ -354,6 +354,9 @@ typedef enum {
     CMD_ADD_UWB_ANCHOR,
     CMD_CLEAR_UWB_ANCHORS,
     CMD_LOG_ETHERNET,
+    CMD_CAMERA_IMAGE,
+    CMD_CAMERA_STREAM_START,
+    CMD_CAMERA_FRAME_ACK,
 
     // Car commands
     CMD_GET_STATE = 120,
@@ -412,7 +415,8 @@ typedef struct {
 typedef enum {
     JS_TYPE_HK = 0,
     JS_TYPE_PS4,
-    JS_TYPE_PS3
+    JS_TYPE_PS3,
+    JS_TYPE_MICRONAV_ONE
 } JS_TYPE;
 
 // ============== RTCM Datatypes ================== //

@@ -57,6 +57,7 @@ void showHelp()
     qDebug() << "--batterycells : Number of cells in series, e.g. for the GUI battery indicator";
     qDebug() << "--simulatecars [num]:[firstid] : Simulate num cars where the first car has ID firstid";
     qDebug() << "--dynosim : Run simulator together with output from AWITAR dyno instead of MotorSim";
+    qDebug() << "--simaprepeatroutes [1 or 0] : Repeat routes setting for the simulation (default: 1)";
 #ifdef HAS_GUI
     qDebug() << "--usegui : Use QML GUI";
 #endif
@@ -110,6 +111,7 @@ int main(int argc, char *argv[])
     int simulateCarNum = 0;
     int simulateCarFirst = 0;
     bool dynoSim = false;
+    bool simApRepeatRoutes = true;
 
 #ifdef HAS_GUI
     bool useGui = false;
@@ -339,6 +341,15 @@ int main(int argc, char *argv[])
             found = true;
         }
 
+        if (str == "--simaprepeatroutes") {
+            if ((i - 1) < args.size()) {
+                i++;
+                bool ok;
+                simApRepeatRoutes = args.at(i).toInt(&ok);
+                found = ok;
+            }
+        }
+
 #ifdef HAS_GUI
         if (str == "--usegui") {
             useGui = true;
@@ -366,10 +377,18 @@ int main(int argc, char *argv[])
 
     if (!ttyPort.isEmpty()) {
         car.connectSerial(ttyPort, baudrate);
+    } else {
+        // Not connected to any car, set default ID
+        if (simulateCarNum > 0) {
+            car.setCarId(simulateCarFirst);
+        } else {
+            car.setCarId(0);
+        }
     }
 
     for (int i = 0;i < simulateCarNum;i++) {
         car.addSimulatedCar(i + simulateCarFirst);
+        car.getSimulatedCar(i + simulateCarFirst)->autopilot()->setRepeatRoutes(simApRepeatRoutes);
     }
 
     if (tcpRtcmPort >= 0) {

@@ -25,6 +25,7 @@
 #include <QEventLoop>
 #include <QCoreApplication>
 #include <QNetworkInterface>
+#include <QBuffer>
 #include "rtcm3_simple.h"
 
 namespace {
@@ -119,6 +120,16 @@ CarClient::CarClient(QObject *parent) : QObject(parent)
             this, SLOT(rtcmReceived(QByteArray,int,bool)));
     connect(mPacketInterface, SIGNAL(logEthernetReceived(quint8,QByteArray)),
             this, SLOT(logEthernetReceived(quint8,QByteArray)));
+
+#if HAS_CAMERA
+    mCameraJpgQuality = -1;
+    mCameraSkipFrames = 0;
+    mCameraSkipFrameCnt = 0;
+    mCameraNoAckCnt = 0;
+    mCamera = new Camera(this);
+    connect(mCamera->video(), SIGNAL(imageCaptured(QImage)),
+            this, SLOT(cameraImageCaptured(QImage)));
+#endif
 }
 
 CarClient::~CarClient()
@@ -145,6 +156,7 @@ void CarClient::connectSerial(QString port, int baudrate)
     qDebug() << "Serial port connected";
 
     mPacketInterface->stopUdpConnection();
+    mPacketInterface->getState(255); // To get car ID
 }
 
 void CarClient::connectSerialRtcm(QString port, int baudrate)
@@ -369,6 +381,11 @@ quint8 CarClient::carId()
     return mCarId;
 }
 
+void CarClient::setCarId(quint8 id)
+{
+    mCarId = id;
+}
+
 void CarClient::connectNtrip(QString server, QString stream, QString user, QString pass, int port)
 {
     mRtcmClient->connectNtrip(server, stream, user, pass, port);
@@ -515,12 +532,76 @@ void CarClient::serialRtcmPortError(QSerialPort::SerialPortError error)
 
 void CarClient::packetDataToSend(QByteArray &data)
 {
-    if (mSerialPort->isOpen()) {
-        mSerialPort->writeData(data);
+    // This is a packet from RControlStation going to the car.
+    // Inspect data and possibly process it here.
+
+    bool packetConsumed = false;
+
+    VByteArray vb(data);
+    vb.remove(0, data[0]);
+
+    quint8 id = vb.vbPopFrontUint8();
+    CMD_PACKET cmd = (CMD_PACKET)vb.vbPopFrontUint8();
+    vb.chop(3);
+
+    (void)id;
+
+    if (id == mCarId || id == 255) {
+        if (cmd == CMD_CAMERA_STREAM_START) {
+#if HAS_CAMERA
+            int camera = vb.vbPopFrontInt16();
+            mCameraJpgQuality = vb.vbPopFrontInt16();
+            int width = vb.vbPopFrontInt16();
+            int height = vb.vbPopFrontInt16();
+            int fps = vb.vbPopFrontInt16();
+            mCameraSkipFrames = vb.vbPopFrontInt16();
+            mCameraNoAckCnt = 0;
+
+            mCamera->closeCamera();
+
+            if (camera >= 0) {
+                mCamera->openCamera(camera);
+                mCamera->startCameraStream(width, height, fps);
+            }
+
+        } else if (cmd == CMD_CAMERA_FRAME_ACK) {
+            mCameraNoAckCnt--;
+#endif
+        } else if (cmd == CMD_TERMINAL_CMD) {
+            QString str(vb);
+
+            if (str == "help") {
+#if HAS_CAMERA
+                printTerminal("camera_info\n"
+                              "  Print information about the available camera.");
+#endif
+            } else if (str == "camera_info") {
+#if HAS_CAMERA
+                bool res = true;
+                if (!mCamera->isLoaded()) {
+                    res = mCamera->openCamera();
+                }
+
+                if (res) {
+                    printTerminal(mCamera->cameraInfo());
+                } else {
+                    printTerminal("No camera available.");
+                }
+
+                packetConsumed = true;
+#endif
+            }
+        }
     }
 
-    for (CarSim *s: mSimulatedCars) {
-        s->processData(data);
+    if (!packetConsumed) {
+        if (mSerialPort->isOpen()) {
+            mSerialPort->writeData(data);
+        }
+
+        for (CarSim *s: mSimulatedCars) {
+            s->processData(data);
+        }
     }
 }
 
@@ -728,6 +809,43 @@ void CarClient::processCarData(QByteArray data)
     mPacketInterface->processData(data);
 }
 
+void CarClient::cameraImageCaptured(QImage img)
+{
+#if HAS_CAMERA
+    if (mCameraSkipFrames > 0) {
+        mCameraSkipFrameCnt++;
+
+        if (mCameraSkipFrameCnt <= mCameraSkipFrames) {
+            return;
+        }
+    }
+
+    // No ack has been received for a couple of frames, meaning that
+    // the connection probably is bad. Drop frame.
+    if (mCameraNoAckCnt >= 3) {
+        return;
+    }
+
+    mCameraSkipFrameCnt = 0;
+
+    QByteArray data;
+    data.append((quint8)mCarId);
+    data.append((char)CMD_CAMERA_IMAGE);
+    QBuffer buffer;
+    buffer.open(QIODevice::WriteOnly);
+    img.save(&buffer, "jpg", mCameraJpgQuality);
+    buffer.close();
+    data.append(buffer.buffer());
+
+    if (data.size() > 100) {
+        carPacketRx(mCarId, CMD_CAMERA_IMAGE, data);
+        mCameraNoAckCnt++;
+    }
+#else
+    (void)img;
+#endif
+}
+
 bool CarClient::setUnixTime(qint64 t)
 {
     // https://askubuntu.com/questions/159007/how-do-i-run-specific-sudo-commands-without-a-password
@@ -740,7 +858,6 @@ bool CarClient::setUnixTime(qint64 t)
 void CarClient::printTerminal(QString str)
 {
     QByteArray packet;
-    packet.clear();
     packet.append((quint8)mCarId);
     packet.append((char)CMD_PRINTF);
     packet.append(str.toLocal8Bit());
