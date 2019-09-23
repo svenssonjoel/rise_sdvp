@@ -1,5 +1,5 @@
 /*
-    Copyright 2012 - 2017 Benjamin Vedder	benjamin@vedder.se
+    Copyright 2012 - 2019 Benjamin Vedder	benjamin@vedder.se
 
     This program is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
@@ -57,7 +57,9 @@ const unsigned short crc16_tab[] = { 0x0000, 0x1021, 0x2042, 0x3063, 0x4084,
 PacketInterface::PacketInterface(QObject *parent) :
     QObject(parent)
 {
-    mSendBuffer = new quint8[mMaxBufferLen + 20];
+    mSendBuffer = new quint8[mMaxBufferLen];
+    mRxBuffer = new unsigned char[mMaxBufferLen];
+    mSendBufferAck = new unsigned char[mMaxBufferLen];
 
     mRxState = 0;
     mRxTimer = 0;
@@ -87,6 +89,8 @@ PacketInterface::PacketInterface(QObject *parent) :
 PacketInterface::~PacketInterface()
 {
     delete[] mSendBuffer;
+    delete[] mRxBuffer;
+    delete[] mSendBufferAck;
 }
 
 void PacketInterface::processData(QByteArray &data)
@@ -100,11 +104,16 @@ void PacketInterface::processData(QByteArray &data)
         switch (mRxState) {
         case 0:
             if (rx_data == 2) {
-                mRxState += 2;
+                mRxState += 3;
                 mRxTimer = rx_timeout;
                 mRxDataPtr = 0;
                 mPayloadLength = 0;
             } else if (rx_data == 3) {
+                mRxState += 2;
+                mRxTimer = rx_timeout;
+                mRxDataPtr = 0;
+                mPayloadLength = 0;
+            } else if (rx_data == 4) {
                 mRxState++;
                 mRxTimer = rx_timeout;
                 mRxDataPtr = 0;
@@ -115,12 +124,18 @@ void PacketInterface::processData(QByteArray &data)
             break;
 
         case 1:
-            mPayloadLength = (unsigned int)rx_data << 8;
+            mPayloadLength |= (unsigned int)rx_data << 16;
             mRxState++;
             mRxTimer = rx_timeout;
             break;
 
         case 2:
+            mPayloadLength |= (unsigned int)rx_data << 8;
+            mRxState++;
+            mRxTimer = rx_timeout;
+            break;
+
+        case 3:
             mPayloadLength |= (unsigned int)rx_data;
             if (mPayloadLength <= mMaxBufferLen && mPayloadLength > 0) {
                 mRxState++;
@@ -130,7 +145,7 @@ void PacketInterface::processData(QByteArray &data)
             }
             break;
 
-        case 3:
+        case 4:
             mRxBuffer[mRxDataPtr++] = rx_data;
             if (mRxDataPtr == mPayloadLength) {
                 mRxState++;
@@ -138,19 +153,19 @@ void PacketInterface::processData(QByteArray &data)
             mRxTimer = rx_timeout;
             break;
 
-        case 4:
+        case 5:
             mCrcHigh = rx_data;
             mRxState++;
             mRxTimer = rx_timeout;
             break;
 
-        case 5:
+        case 6:
             mCrcLow = rx_data;
             mRxState++;
             mRxTimer = rx_timeout;
             break;
 
-        case 6:
+        case 7:
             if (rx_data == 3) {
                 if (crc16(mRxBuffer, mPayloadLength) ==
                         ((unsigned short)mCrcHigh << 8 | (unsigned short)mCrcLow)) {
@@ -167,173 +182,6 @@ void PacketInterface::processData(QByteArray &data)
             break;
         }
     }
-}
-
-void PacketInterface::timerSlot()
-{
-    if (mRxTimer) {
-        mRxTimer--;
-    } else {
-        mRxState = 0;
-    }
-}
-
-void PacketInterface::readPendingDatagrams()
-{
-    while (mUdpSocket->hasPendingDatagrams()) {
-        QByteArray datagram;
-        datagram.resize(mUdpSocket->pendingDatagramSize());
-        QHostAddress sender;
-        quint16 senderPort;
-
-        mUdpSocket->readDatagram(datagram.data(), datagram.size(),
-                                 &sender, &senderPort);
-
-        if (mUdpServer) {
-            mHostAddress = sender;
-        }
-
-        processPacket((unsigned char*)datagram.data(), datagram.length());
-    }
-}
-
-unsigned short PacketInterface::crc16(const unsigned char *buf, unsigned int len)
-{
-    unsigned int i;
-    unsigned short cksum = 0;
-    for (i = 0; i < len; i++) {
-        cksum = crc16_tab[(((cksum >> 8) ^ *buf++) & 0xFF)] ^ (cksum << 8);
-    }
-    return cksum;
-}
-
-bool PacketInterface::sendPacket(const unsigned char *data, unsigned int len_packet)
-{
-    unsigned int ind = 0;
-
-    // If the IP is valid, send the packet over UDP
-    if (QString::compare(mHostAddress.toString(), "0.0.0.0") != 0) {
-        memcpy(mSendBufferAck + ind, data, len_packet);
-        ind += len_packet;
-
-        QByteArray toSend = QByteArray::fromRawData((const char*)mSendBufferAck, ind);
-        mUdpSocket->writeDatagram(toSend, mHostAddress, mUdpPort);
-
-        if (QString::compare(mHostAddress2.toString(), "0.0.0.0") != 0) {
-            mUdpSocket->writeDatagram(toSend, mHostAddress2, mUdpPort);
-        }
-
-        return true;
-    }
-
-    int len_tot = len_packet;
-    unsigned int data_offs = 0;
-
-    if (len_tot <= 256) {
-        mSendBufferAck[ind++] = 2;
-        mSendBufferAck[ind++] = len_tot;
-        data_offs = 2;
-    } else {
-        mSendBufferAck[ind++] = 3;
-        mSendBufferAck[ind++] = len_tot >> 8;
-        mSendBufferAck[ind++] = len_tot & 0xFF;
-        data_offs = 3;
-    }
-
-    memcpy(mSendBufferAck + ind, data, len_packet);
-    ind += len_packet;
-
-    unsigned short crc = crc16(mSendBufferAck + data_offs, len_tot);
-    mSendBufferAck[ind++] = crc >> 8;
-    mSendBufferAck[ind++] = crc;
-    mSendBufferAck[ind++] = 3;
-
-    QByteArray sendData = QByteArray::fromRawData((char*)mSendBufferAck, ind);
-
-    emit dataToSend(sendData);
-
-    return true;
-}
-
-bool PacketInterface::sendPacket(QByteArray data)
-{
-    return sendPacket((const unsigned char*)data.data(), data.size());
-}
-
-/**
- * @brief PacketInterface::sendPacketAck
- * Send packet and wait for acknoledgement.
- *
- * @param data
- * The data to be sent.
- *
- * @param len_packet
- * Size of the data.
- *
- * @param retries
- * The maximum number of retries before giving up.
- *
- * @param timeoutMs
- * Time to wait before trying again.
- *
- * @return
- * True for success, false otherwise.
- */
-bool PacketInterface::sendPacketAck(const unsigned char *data, unsigned int len_packet,
-                                    int retries, int timeoutMs)
-{
-    if (mWaitingAck) {
-        qDebug() << "Already waiting for packet";
-        return false;
-    }
-
-    mWaitingAck = true;
-
-    unsigned char *buffer = new unsigned char[mMaxBufferLen];
-    bool ok = false;
-    memcpy(buffer, data, len_packet);
-
-    for (int i = 0;i < retries;i++) {
-        QEventLoop loop;
-        QTimer timeoutTimer;
-        timeoutTimer.setSingleShot(true);
-        timeoutTimer.start(timeoutMs);
-        connect(this, SIGNAL(ackReceived(quint8, CMD_PACKET, QString)), &loop, SLOT(quit()));
-        connect(&timeoutTimer, SIGNAL(timeout()), &loop, SLOT(quit()));
-
-        QTimer::singleShot(0, [this, buffer, len_packet]() {
-            sendPacket(buffer, len_packet);
-        });
-
-        loop.exec();
-
-        if (timeoutTimer.isActive()) {
-            ok = true;
-            break;
-        }
-
-        qDebug() << "Retrying to send packet...";
-    }
-
-    mWaitingAck = false;
-    delete buffer;
-    return ok;
-}
-
-bool PacketInterface::waitSignal(QObject *sender, const char *signal, int timeoutMs)
-{
-    QEventLoop loop;
-    QTimer timeoutTimer;
-    timeoutTimer.setSingleShot(true);
-    timeoutTimer.start(timeoutMs);
-    auto conn1 = connect(sender, signal, &loop, SLOT(quit()));
-    auto conn2 = connect(&timeoutTimer, SIGNAL(timeout()), &loop, SLOT(quit()));
-    loop.exec();
-
-    disconnect(conn1);
-    disconnect(conn2);
-
-    return timeoutTimer.isActive();
 }
 
 void PacketInterface::processPacket(const unsigned char *data, int len)
@@ -376,8 +224,10 @@ void PacketInterface::processPacket(const unsigned char *data, int len)
             LocPoint p;
             p.setX(utility::buffer_get_double32_auto(data, &ind));
             p.setY(utility::buffer_get_double32_auto(data, &ind));
+            p.setHeight(utility::buffer_get_double32_auto(data, &ind));
             p.setSpeed(utility::buffer_get_double32_auto(data, &ind));
             p.setTime(utility::buffer_get_int32(data, &ind));
+            p.setAttributes(utility::buffer_get_uint32(data, &ind));
             route.append(p);
         }
 
@@ -430,6 +280,7 @@ void PacketInterface::processPacket(const unsigned char *data, int len)
 
         conf.ap_repeat_routes = data[ind++];
         conf.ap_base_rad = utility::buffer_get_double32_auto(data, &ind);
+        conf.ap_rad_time_ahead = utility::buffer_get_double32_auto(data, &ind);
         conf.ap_mode_time = data[ind++];
         conf.ap_max_speed = utility::buffer_get_double32_auto(data, &ind);
         conf.ap_time_add_repeat_ms = utility::buffer_get_int32(data, &ind);
@@ -447,6 +298,7 @@ void PacketInterface::processPacket(const unsigned char *data, int len)
         conf.car.disable_motor = data[ind++];
         conf.car.simulate_motor = data[ind++];
         conf.car.clamp_imu_yaw_stationary = data[ind++];
+        conf.car.use_uwb_pos = data[ind++];
 
         conf.car.gear_ratio = utility::buffer_get_double32_auto(data, &ind);
         conf.car.wheel_diam = utility::buffer_get_double32_auto(data, &ind);
@@ -543,58 +395,6 @@ void PacketInterface::processPacket(const unsigned char *data, int len)
         emit plotSetGraphReceived(id, data[0]);
     } break;
 
-    case CMD_RADAR_SETUP_GET: {
-        int32_t ind = 0;
-        radar_settings_t s;
-
-        s.f_center = utility::buffer_get_double32_auto(data, &ind);
-        s.f_span = utility::buffer_get_double32_auto(data, &ind);
-        s.points = utility::buffer_get_int16(data, &ind);
-        s.t_sweep = utility::buffer_get_double32_auto(data, &ind);
-        s.cc_x = utility::buffer_get_double32_auto(data, &ind);
-        s.cc_y = utility::buffer_get_double32_auto(data, &ind);
-        s.cc_rad = utility::buffer_get_double32_auto(data, &ind);
-        s.log_rate_ms = utility::buffer_get_int32(data, &ind);
-        s.log_en = data[ind++];
-        s.map_plot_avg_factor = utility::buffer_get_double32_auto(data, &ind);
-        s.map_plot_max_div = utility::buffer_get_double32_auto(data, &ind);
-        s.plot_mode = data[ind++];
-        s.map_plot_start = utility::buffer_get_uint16(data, &ind);
-        s.map_plot_end = utility::buffer_get_uint16(data, &ind);
-
-        emit radarSetupReceived(id, s);
-    } break;
-
-    case CMD_RADAR_SAMPLES: {
-        int32_t ind = 0;
-        QVector<QPair<double, double> > samples;
-        while (ind < len) {
-            QPair<double, double> p;
-            p.first = utility::buffer_get_double32_auto(data, &ind);
-            p.second = utility::buffer_get_double32_auto(data, &ind);
-            samples.append(p);
-        }
-
-        emit radarSamplesReceived(id, samples);
-    } break;
-
-    case CMD_DW_SAMPLE: {
-        int32_t ind = 0;
-        DW_LOG_INFO dw;
-
-        dw.valid = data[ind++];
-        dw.dw_anchor = data[ind++];
-        dw.time_today_ms = utility::buffer_get_int32(data, &ind);
-        dw.dw_dist = utility::buffer_get_double32_auto(data, &ind);
-        dw.px = utility::buffer_get_double32_auto(data, &ind);
-        dw.py = utility::buffer_get_double32_auto(data, &ind);
-        dw.px_gps = utility::buffer_get_double32_auto(data, &ind);
-        dw.py_gps = utility::buffer_get_double32_auto(data, &ind);
-        dw.pz_gps = utility::buffer_get_double32_auto(data, &ind);
-
-        emit dwSampleReceived(id, dw);
-    } break;
-
     case CMD_SET_SYSTEM_TIME: {
         int32_t ind = 0;
         qint32 sec = utility::buffer_get_int32(data, &ind);
@@ -611,6 +411,10 @@ void PacketInterface::processPacket(const unsigned char *data, int len)
     case CMD_LOG_ETHERNET: {
         QByteArray tmpArray((char*)data, len);
         emit logEthernetReceived(id, tmpArray);
+    } break;
+
+    case CMD_CAMERA_IMAGE: {
+        emit cameraImageReceived(id, QImage::fromData(data, len), len);
     } break;
 
         // Car commands
@@ -726,9 +530,6 @@ void PacketInterface::processPacket(const unsigned char *data, int len)
     case CMD_SET_YAW_OFFSET_ACK:
         emit ackReceived(id, cmd, "CMD_SET_YAW_OFFSET_ACK");
         break;
-    case CMD_RADAR_SETUP_SET:
-        emit ackReceived(id, cmd, "CMD_RADAR_SETUP_SET");
-        break;
     case CMD_SET_SYSTEM_TIME_ACK:
         emit ackReceived(id, cmd, "CMD_SET_SYSTEM_TIME_ACK");
         break;
@@ -748,6 +549,179 @@ void PacketInterface::processPacket(const unsigned char *data, int len)
     default:
         break;
     }
+}
+
+void PacketInterface::timerSlot()
+{
+    if (mRxTimer) {
+        mRxTimer--;
+    } else {
+        mRxState = 0;
+    }
+}
+
+void PacketInterface::readPendingDatagrams()
+{
+    while (mUdpSocket->hasPendingDatagrams()) {
+        QByteArray datagram;
+        datagram.resize(mUdpSocket->pendingDatagramSize());
+        QHostAddress sender;
+        quint16 senderPort;
+
+        mUdpSocket->readDatagram(datagram.data(), datagram.size(),
+                                 &sender, &senderPort);
+
+        if (mUdpServer) {
+            mHostAddress = sender;
+        }
+
+        processPacket((unsigned char*)datagram.data(), datagram.length());
+    }
+}
+
+unsigned short PacketInterface::crc16(const unsigned char *buf, unsigned int len)
+{
+    unsigned int i;
+    unsigned short cksum = 0;
+    for (i = 0; i < len; i++) {
+        cksum = crc16_tab[(((cksum >> 8) ^ *buf++) & 0xFF)] ^ (cksum << 8);
+    }
+    return cksum;
+}
+
+bool PacketInterface::sendPacket(const unsigned char *data, unsigned int len_packet)
+{
+    unsigned int ind = 0;
+
+    // If the IP is valid, send the packet over UDP
+    if (QString::compare(mHostAddress.toString(), "0.0.0.0") != 0) {
+        memcpy(mSendBufferAck + ind, data, len_packet);
+        ind += len_packet;
+
+        QByteArray toSend = QByteArray::fromRawData((const char*)mSendBufferAck, ind);
+        mUdpSocket->writeDatagram(toSend, mHostAddress, mUdpPort);
+
+        if (QString::compare(mHostAddress2.toString(), "0.0.0.0") != 0) {
+            mUdpSocket->writeDatagram(toSend, mHostAddress2, mUdpPort);
+        }
+
+        return true;
+    }
+
+    int len_tot = len_packet;
+    unsigned int data_offs = 0;
+
+    if (len_tot <= 255) {
+        mSendBufferAck[ind++] = 2;
+        mSendBufferAck[ind++] = len_tot;
+        data_offs = 2;
+    } else if (len_tot <= 65535) {
+        mSendBufferAck[ind++] = 3;
+        mSendBufferAck[ind++] = len_tot >> 8;
+        mSendBufferAck[ind++] = len_tot & 0xFF;
+        data_offs = 3;
+    } else {
+        mSendBufferAck[ind++] = 4;
+        mSendBufferAck[ind++] = (len_tot >> 16) & 0xFF;
+        mSendBufferAck[ind++] = (len_tot >> 8) & 0xFF;
+        mSendBufferAck[ind++] = len_tot & 0xFF;
+        data_offs = 4;
+    }
+
+    memcpy(mSendBufferAck + ind, data, len_packet);
+    ind += len_packet;
+
+    unsigned short crc = crc16(mSendBufferAck + data_offs, len_tot);
+    mSendBufferAck[ind++] = crc >> 8;
+    mSendBufferAck[ind++] = crc;
+    mSendBufferAck[ind++] = 3;
+
+    QByteArray sendData = QByteArray::fromRawData((char*)mSendBufferAck, ind);
+
+    emit dataToSend(sendData);
+
+    return true;
+}
+
+bool PacketInterface::sendPacket(QByteArray data)
+{
+    return sendPacket((const unsigned char*)data.data(), data.size());
+}
+
+/**
+ * @brief PacketInterface::sendPacketAck
+ * Send packet and wait for acknoledgement.
+ *
+ * @param data
+ * The data to be sent.
+ *
+ * @param len_packet
+ * Size of the data.
+ *
+ * @param retries
+ * The maximum number of retries before giving up.
+ *
+ * @param timeoutMs
+ * Time to wait before trying again.
+ *
+ * @return
+ * True for success, false otherwise.
+ */
+bool PacketInterface::sendPacketAck(const unsigned char *data, unsigned int len_packet,
+                                    int retries, int timeoutMs)
+{
+    if (mWaitingAck) {
+        qDebug() << "Already waiting for packet";
+        return false;
+    }
+
+    mWaitingAck = true;
+
+    unsigned char *buffer = new unsigned char[len_packet];
+    bool ok = false;
+    memcpy(buffer, data, len_packet);
+
+    for (int i = 0;i < retries;i++) {
+        QEventLoop loop;
+        QTimer timeoutTimer;
+        timeoutTimer.setSingleShot(true);
+        timeoutTimer.start(timeoutMs);
+        connect(this, SIGNAL(ackReceived(quint8, CMD_PACKET, QString)), &loop, SLOT(quit()));
+        connect(&timeoutTimer, SIGNAL(timeout()), &loop, SLOT(quit()));
+
+        QTimer::singleShot(0, [this, buffer, len_packet]() {
+            sendPacket(buffer, len_packet);
+        });
+
+        loop.exec();
+
+        if (timeoutTimer.isActive()) {
+            ok = true;
+            break;
+        }
+
+        qDebug() << "Retrying to send packet...";
+    }
+
+    mWaitingAck = false;
+    delete[] buffer;
+    return ok;
+}
+
+bool PacketInterface::waitSignal(QObject *sender, const char *signal, int timeoutMs)
+{
+    QEventLoop loop;
+    QTimer timeoutTimer;
+    timeoutTimer.setSingleShot(true);
+    timeoutTimer.start(timeoutMs);
+    auto conn1 = connect(sender, signal, &loop, SLOT(quit()));
+    auto conn2 = connect(&timeoutTimer, SIGNAL(timeout()), &loop, SLOT(quit()));
+    loop.exec();
+
+    disconnect(conn1);
+    disconnect(conn2);
+
+    return timeoutTimer.isActive();
 }
 
 void PacketInterface::startUdpConnection(QHostAddress ip, int port)
@@ -796,8 +770,10 @@ bool PacketInterface::setRoutePoints(quint8 id, QList<LocPoint> points, int retr
         LocPoint *p = &points[i];
         utility::buffer_append_double32(mSendBuffer, p->getX(), 1e4, &send_index);
         utility::buffer_append_double32(mSendBuffer, p->getY(), 1e4, &send_index);
+        utility::buffer_append_double32(mSendBuffer, p->getHeight(), 1e4, &send_index);
         utility::buffer_append_double32(mSendBuffer, p->getSpeed(), 1e6, &send_index);
         utility::buffer_append_int32(mSendBuffer, p->getTime(), &send_index);
+        utility::buffer_append_uint32(mSendBuffer, p->getAttributes(), &send_index);
     }
 
     return sendPacketAck(mSendBuffer, send_index, retries);
@@ -813,8 +789,10 @@ bool PacketInterface::replaceRoute(quint8 id, QList<LocPoint> points, int retrie
         LocPoint *p = &points[i];
         utility::buffer_append_double32(mSendBuffer, p->getX(), 1e4, &send_index);
         utility::buffer_append_double32(mSendBuffer, p->getY(), 1e4, &send_index);
+        utility::buffer_append_double32(mSendBuffer, p->getHeight(), 1e4, &send_index);
         utility::buffer_append_double32(mSendBuffer, p->getSpeed(), 1e6, &send_index);
         utility::buffer_append_int32(mSendBuffer, p->getTime(), &send_index);
+        utility::buffer_append_uint32(mSendBuffer, p->getAttributes(), &send_index);
     }
 
     return sendPacketAck(mSendBuffer, send_index, retries);
@@ -885,6 +863,7 @@ bool PacketInterface::setConfiguration(quint8 id, MAIN_CONFIG &conf, int retries
 
     mSendBuffer[send_index++] = conf.ap_repeat_routes;
     utility::buffer_append_double32_auto(mSendBuffer, conf.ap_base_rad, &send_index);
+    utility::buffer_append_double32_auto(mSendBuffer, conf.ap_rad_time_ahead, &send_index);
     mSendBuffer[send_index++] = conf.ap_mode_time;
     utility::buffer_append_double32_auto(mSendBuffer, conf.ap_max_speed, &send_index);
     utility::buffer_append_int32(mSendBuffer, conf.ap_time_add_repeat_ms, &send_index);
@@ -902,6 +881,7 @@ bool PacketInterface::setConfiguration(quint8 id, MAIN_CONFIG &conf, int retries
     mSendBuffer[send_index++] = conf.car.disable_motor;
     mSendBuffer[send_index++] = conf.car.simulate_motor;
     mSendBuffer[send_index++] = conf.car.clamp_imu_yaw_stationary;
+    mSendBuffer[send_index++] = conf.car.use_uwb_pos;
 
     utility::buffer_append_double32_auto(mSendBuffer, conf.car.gear_ratio, &send_index);
     utility::buffer_append_double32_auto(mSendBuffer, conf.car.wheel_diam, &send_index);
@@ -1002,28 +982,6 @@ bool PacketInterface::setEnuRef(quint8 id, double *llh, int retries)
     return sendPacketAck(mSendBuffer, send_index, retries);
 }
 
-bool PacketInterface::radarSetupSet(quint8 id, radar_settings_t *s, int retries)
-{
-    qint32 send_index = 0;
-    mSendBuffer[send_index++] = id;
-    mSendBuffer[send_index++] = CMD_RADAR_SETUP_SET;
-    utility::buffer_append_double32_auto(mSendBuffer, s->f_center, &send_index);
-    utility::buffer_append_double32_auto(mSendBuffer, s->f_span, &send_index);
-    utility::buffer_append_int16(mSendBuffer, s->points, &send_index);
-    utility::buffer_append_double32_auto(mSendBuffer, s->t_sweep, &send_index);
-    utility::buffer_append_double32_auto(mSendBuffer, s->cc_x, &send_index);
-    utility::buffer_append_double32_auto(mSendBuffer, s->cc_y, &send_index);
-    utility::buffer_append_double32_auto(mSendBuffer, s->cc_rad, &send_index);
-    utility::buffer_append_int32(mSendBuffer, s->log_rate_ms, &send_index);
-    mSendBuffer[send_index++] = s->log_en;
-    utility::buffer_append_double32_auto(mSendBuffer, s->map_plot_avg_factor, &send_index);
-    utility::buffer_append_double32_auto(mSendBuffer, s->map_plot_max_div, &send_index);
-    mSendBuffer[send_index++] = s->plot_mode;
-    utility::buffer_append_uint16(mSendBuffer, s->map_plot_start, &send_index);
-    utility::buffer_append_uint16(mSendBuffer, s->map_plot_end, &send_index);
-    return sendPacketAck(mSendBuffer, send_index, retries);
-}
-
 bool PacketInterface::setSystemTime(quint8 id, qint32 sec, qint32 usec, int retries)
 {
     qint32 send_index = 0;
@@ -1050,32 +1008,37 @@ bool PacketInterface::getRoutePart(quint8 id,
                                    int &routeLen,
                                    int retries)
 {
-    quint8 idRx;
+    bool appendDone = false;
 
     auto conn = connect(this, &PacketInterface::routePartReceived,
-                        [&routeLen, &points, &idRx](quint8 id, int len,
-                        const QList<LocPoint> &route){
-        idRx = id;
-        routeLen = len;
-        points.append(route);
-    }
-    );
+                        [&routeLen, &points, &appendDone](quint8 id, int len,
+                        const QList<LocPoint> &route) {
+        (void)id;
+
+        if (points.isEmpty() || route.isEmpty() ||
+                points.last().getDistanceTo(route.last()) > 1e-4) {
+            routeLen = len;
+            points.append(route);
+            appendDone = true;
+        }
+    });
 
     bool res = false;
     for (int i = 0;i < retries;i++) {
         qint32 send_index = 0;
-        mSendBuffer[send_index++] = id;
-        mSendBuffer[send_index++] = CMD_AP_GET_ROUTE_PART;
-        utility::buffer_append_int32(mSendBuffer, first, &send_index);
-        mSendBuffer[send_index++] = num;
+        quint8 buffer[20];
+        buffer[send_index++] = id;
+        buffer[send_index++] = CMD_AP_GET_ROUTE_PART;
+        utility::buffer_append_int32(buffer, first, &send_index);
+        buffer[send_index++] = num;
 
-        QTimer::singleShot(0, [this, &send_index]() {
-            sendPacket(mSendBuffer, send_index);
+        QTimer::singleShot(0, [this, &send_index, &buffer]() {
+            sendPacket(buffer, send_index);
         });
 
         res = waitSignal(this, SIGNAL(routePartReceived(quint8,int,QList<LocPoint>)), 200);
 
-        if (res) {
+        if (res && appendDone) {
             break;
         }
 
@@ -1084,7 +1047,12 @@ bool PacketInterface::getRoutePart(quint8 id,
 
     disconnect(conn);
 
-    return res;
+    if (res && !appendDone) {
+        qDebug() << "Route contains the same part multiple times. Make sure that it is not "
+                    "corrupted.";
+    }
+
+    return res && appendDone;
 }
 
 bool PacketInterface::getRoute(quint8 id, QList<LocPoint> &points, int retries)
@@ -1329,15 +1297,6 @@ void PacketInterface::setMsToday(quint8 id, qint32 time)
     sendPacket(mSendBuffer, send_index);
 }
 
-void PacketInterface::radarSetupGet(quint8 id)
-{
-    QByteArray packet;
-    packet.clear();
-    packet.append(id);
-    packet.append((char)CMD_RADAR_SETUP_GET);
-    sendPacket(packet);
-}
-
 void PacketInterface::mrRcControl(quint8 id, double throttle, double roll, double pitch, double yaw)
 {
     qint32 send_index = 0;
@@ -1360,4 +1319,28 @@ void PacketInterface::mrOverridePower(quint8 id, double fl_f, double bl_l, doubl
     utility::buffer_append_double32_auto(mSendBuffer, fr_r, &send_index);
     utility::buffer_append_double32_auto(mSendBuffer, br_b, &send_index);
     sendPacket(mSendBuffer, send_index);
+}
+
+void PacketInterface::startCameraStream(quint8 id, int camera, int quality,
+                                        int width, int height, int fps, int skip)
+{
+    qint32 send_index = 0;
+    mSendBuffer[send_index++] = id;
+    mSendBuffer[send_index++] = CMD_CAMERA_STREAM_START;
+    utility::buffer_append_int16(mSendBuffer, camera, &send_index);
+    utility::buffer_append_int16(mSendBuffer, quality, &send_index);
+    utility::buffer_append_int16(mSendBuffer, width, &send_index);
+    utility::buffer_append_int16(mSendBuffer, height, &send_index);
+    utility::buffer_append_int16(mSendBuffer, fps, &send_index);
+    utility::buffer_append_int16(mSendBuffer, skip, &send_index);
+    sendPacket(mSendBuffer, send_index);
+}
+
+void PacketInterface::sendCameraFrameAck(quint8 id)
+{
+    QByteArray packet;
+    packet.clear();
+    packet.append(id);
+    packet.append((char)CMD_CAMERA_FRAME_ACK);
+    sendPacket(packet);
 }

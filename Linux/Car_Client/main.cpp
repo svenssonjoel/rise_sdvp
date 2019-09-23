@@ -26,6 +26,7 @@
 #include <QDebug>
 #include <signal.h>
 #include <QDir>
+#include <QNetworkInterface>
 
 #include "carclient.h"
 #include "chronos.h"
@@ -44,19 +45,25 @@ void showHelp()
     qDebug() << "--tcpnmeaport : NMEA server port";
     qDebug() << "--useudp : Use UDP server";
     qDebug() << "--udpport : Port to use for the UDP server";
-    qDebug() << "--usetcp : Use TCP server";
-    qDebug() << "--tcpport : Port to use for the TCP server";
+    qDebug() << "--usetcp : Use TCP server (will be used by default)";
+    qDebug() << "--notcp : Do not use TCP server";
+    qDebug() << "--tcpport : Specify port to use for the TCP server (default: 8300)";
     qDebug() << "--logusb : Store log files";
     qDebug() << "--logusbdir : Directory to store USB logs to";
     qDebug() << "--inputrtcm : Input RTCM data from serial port";
     qDebug() << "--ttyportrtcm : Serial port for RTCM, e.g. /dev/ttyUSB0";
     qDebug() << "--rtcmbaud : RTCM port baud rate, e.g. 9600";
     qDebug() << "--chronos : Run CHRONOS client";
+    qDebug() << "--chronossettxid : Set CHRONOS transmitter id";
+    qDebug() << "--chronoshostaddr [address] : Use network interface with address (default: any interface)";
     qDebug() << "--ntrip [server]:[stream]:[user]:[password]:[port] : Connect to ntrip server";
     qDebug() << "--rtcmbasepos [lat]:[lon]:[height] : Inject RTCM base position message";
     qDebug() << "--batterycells : Number of cells in series, e.g. for the GUI battery indicator";
     qDebug() << "--simulatecars [num]:[firstid] : Simulate num cars where the first car has ID firstid";
     qDebug() << "--dynosim : Run simulator together with output from AWITAR dyno instead of MotorSim";
+    qDebug() << "--simaprepeatroutes [1 or 0] : Repeat routes setting for the simulation (default: 1)";
+    qDebug() << "--simlogen [rateHz] : Enable simulator logging output at rateHz Hz";
+    qDebug() << "--simuwben [port]:[rateHz] : Enable simulator UWB emulation output on TCP port port at rateHz Hz";
 #ifdef HAS_GUI
     qDebug() << "--usegui : Use QML GUI";
 #endif
@@ -88,7 +95,7 @@ int main(int argc, char *argv[])
     int tcpNmeaPort = 2948;
     bool useUdp = false;
     int udpPort = 8300;
-    bool useTcp = false;
+    bool useTcp = true;
     int tcpPort = 8300;
     bool logUsb = false;
     QString logUsbDir = QDir::currentPath() + "/logs";
@@ -96,6 +103,8 @@ int main(int argc, char *argv[])
     QString ttyPortRtcm = "/dev/ttyUSB0";
     int rtcmBaud = 9600;
     bool useChronos = false;
+    int chronosTxId = -1;
+    QString chronosHostAddr;
     bool useNtrip = false;
     QString ntripServer;
     QString ntripStream;
@@ -110,6 +119,10 @@ int main(int argc, char *argv[])
     int simulateCarNum = 0;
     int simulateCarFirst = 0;
     bool dynoSim = false;
+    bool simApRepeatRoutes = true;
+    int simLogHz = -1;
+    int simUwbHz = -1;
+    int simUwbTcpPort = -1;
 
 #ifdef HAS_GUI
     bool useGui = false;
@@ -141,7 +154,7 @@ int main(int argc, char *argv[])
         }
 
         if ((dash && str.contains('p')) || str == "--ttyport") {
-            if ((i - 1) < args.size()) {
+            if ((i + 1) < args.size()) {
                 i++;
                 ttyPort = args.at(i);
                 found = true;
@@ -149,7 +162,7 @@ int main(int argc, char *argv[])
         }
 
         if ((dash && str.contains('b')) || str == "--baudrate") {
-            if ((i - 1) < args.size()) {
+            if ((i + 1) < args.size()) {
                 i++;
                 bool ok;
                 baudrate = args.at(i).toInt(&ok);
@@ -158,7 +171,7 @@ int main(int argc, char *argv[])
         }
 
         if ((dash && str.contains('l')) || str == "--log") {
-            if ((i - 1) < args.size()) {
+            if ((i + 1) < args.size()) {
                 i++;
                 logFile = args.at(i);
                 found = true;
@@ -166,7 +179,7 @@ int main(int argc, char *argv[])
         }
 
         if (str == "--tcprtcmserver") {
-            if ((i - 1) < args.size()) {
+            if ((i + 1) < args.size()) {
                 i++;
                 bool ok;
                 tcpRtcmPort = args.at(i).toInt(&ok);
@@ -175,7 +188,7 @@ int main(int argc, char *argv[])
         }
 
         if (str == "--tcpubxserver") {
-            if ((i - 1) < args.size()) {
+            if ((i + 1) < args.size()) {
                 i++;
                 bool ok;
                 tcpUbxPort = args.at(i).toInt(&ok);
@@ -184,7 +197,7 @@ int main(int argc, char *argv[])
         }
 
         if (str == "--tcplogserver") {
-            if ((i - 1) < args.size()) {
+            if ((i + 1) < args.size()) {
                 i++;
                 bool ok;
                 tcpLogPort = args.at(i).toInt(&ok);
@@ -193,7 +206,7 @@ int main(int argc, char *argv[])
         }
 
         if (str == "--tcpnmeasrv") {
-            if ((i - 1) < args.size()) {
+            if ((i + 1) < args.size()) {
                 i++;
                 tcpNmeaServer = args.at(i);
                 found = true;
@@ -201,7 +214,7 @@ int main(int argc, char *argv[])
         }
 
         if (str == "--tcpnmeaport") {
-            if ((i - 1) < args.size()) {
+            if ((i + 1) < args.size()) {
                 i++;
                 bool ok;
                 tcpNmeaPort = args.at(i).toInt(&ok);
@@ -215,7 +228,7 @@ int main(int argc, char *argv[])
         }
 
         if (str == "--udpport") {
-            if ((i - 1) < args.size()) {
+            if ((i + 1) < args.size()) {
                 i++;
                 bool ok;
                 udpPort = args.at(i).toInt(&ok);
@@ -228,8 +241,13 @@ int main(int argc, char *argv[])
             found = true;
         }
 
+        if (str == "--notcp") {
+            useTcp = false;
+            found = true;
+        }
+
         if (str == "--tcpport") {
-            if ((i - 1) < args.size()) {
+            if ((i + 1) < args.size()) {
                 i++;
                 bool ok;
                 tcpPort = args.at(i).toInt(&ok);
@@ -243,7 +261,7 @@ int main(int argc, char *argv[])
         }
 
         if (str == "--logusbdir") {
-            if ((i - 1) < args.size()) {
+            if ((i + 1) < args.size()) {
                 i++;
                 logUsbDir = args.at(i);
                 found = true;
@@ -256,7 +274,7 @@ int main(int argc, char *argv[])
         }
 
         if (str == "--ttyportrtcm") {
-            if ((i - 1) < args.size()) {
+            if ((i + 1) < args.size()) {
                 i++;
                 ttyPortRtcm = args.at(i);
                 found = true;
@@ -264,7 +282,7 @@ int main(int argc, char *argv[])
         }
 
         if (str == "--rtcmbaud") {
-            if ((i - 1) < args.size()) {
+            if ((i + 1) < args.size()) {
                 i++;
                 bool ok;
                 rtcmBaud = args.at(i).toInt(&ok);
@@ -277,8 +295,25 @@ int main(int argc, char *argv[])
             found = true;
         }
 
+        if (str == "--chronossettxid") {
+            if ((i + 1) < args.size()) {
+                i++;
+                bool ok;
+                chronosTxId = args.at(i).toInt(&ok);
+                found = ok;
+            }
+        }
+
+        if (str == "--chronoshostaddr") {
+            if ((i + 1) < args.size()) {
+                i++;
+                chronosHostAddr = args.at(i);
+                found = true;
+            }
+        }
+
         if (str == "--ntrip") {
-            if ((i - 1) < args.size()) {
+            if ((i + 1) < args.size()) {
                 i++;
                 QString tmp = args.at(i);
                 QStringList ntripData = tmp.split(":");
@@ -296,7 +331,7 @@ int main(int argc, char *argv[])
         }
 
         if (str == "--rtcmbasepos") {
-            if ((i - 1) < args.size()) {
+            if ((i + 1) < args.size()) {
                 i++;
                 QString tmp = args.at(i);
                 QStringList baseData = tmp.split(":");
@@ -312,7 +347,7 @@ int main(int argc, char *argv[])
         }
 
         if (str == "--batterycells") {
-            if ((i - 1) < args.size()) {
+            if ((i + 1) < args.size()) {
                 i++;
                 bool ok;
                 batteryCells = args.at(i).toInt(&ok);
@@ -321,7 +356,7 @@ int main(int argc, char *argv[])
         }
 
         if (str == "--simulatecars") {
-            if ((i - 1) < args.size()) {
+            if ((i + 1) < args.size()) {
                 i++;
                 QString tmp = args.at(i);
                 QStringList simData = tmp.split(":");
@@ -337,6 +372,36 @@ int main(int argc, char *argv[])
         if (str == "--dynosim") {
             dynoSim = true;
             found = true;
+        }
+
+        if (str == "--simaprepeatroutes") {
+            if ((i + 1) < args.size()) {
+                i++;
+                bool ok;
+                simApRepeatRoutes = args.at(i).toInt(&ok);
+                found = ok;
+            }
+        }
+
+        if (str == "--simlogen") {
+            if ((i + 1) < args.size()) {
+                i++;
+                bool ok;
+                simLogHz = args.at(i).toInt(&ok);
+                found = ok;
+            }
+        }
+
+        if (str == "--simuwben") {
+            if ((i + 1) < args.size()) {
+                i++;
+                QStringList param = args.at(i).split(":");
+                if (param.size() == 2) {
+                    found = true;
+                    simUwbTcpPort = param.at(0).toInt();
+                    simUwbHz = param.at(1).toInt();
+                }
+            }
         }
 
 #ifdef HAS_GUI
@@ -366,10 +431,24 @@ int main(int argc, char *argv[])
 
     if (!ttyPort.isEmpty()) {
         car.connectSerial(ttyPort, baudrate);
+    } else {
+        // Not connected to any car, set default ID
+        if (simulateCarNum > 0) {
+            car.setCarId(simulateCarFirst);
+        } else {
+            car.setCarId(0);
+        }
     }
 
     for (int i = 0;i < simulateCarNum;i++) {
         car.addSimulatedCar(i + simulateCarFirst);
+        car.getSimulatedCar(i + simulateCarFirst)->autopilot()->setRepeatRoutes(simApRepeatRoutes);
+        if (simLogHz > 0) {
+            car.getSimulatedCar(i + simulateCarFirst)->startLogBroadcast(simLogHz);
+        }
+        if (simUwbHz > 0) {
+            car.getSimulatedCar(i + simulateCarFirst)->startUwbBroadcast(simUwbTcpPort, simUwbHz);
+        }
     }
 
     if (tcpRtcmPort >= 0) {
@@ -396,7 +475,12 @@ int main(int argc, char *argv[])
     }
 
     if (useTcp) {
-        car.startTcpServer(tcpPort);
+        if (chronosHostAddr.isNull()) {
+            car.startTcpServer(tcpPort);
+        } else {
+            // Start Car Tcp server at same addr as chronos host addr
+            car.startTcpServer(tcpPort,QHostAddress(chronosHostAddr));
+        }
     }
 
     if (logUsb) {
@@ -408,7 +492,29 @@ int main(int argc, char *argv[])
     }
 
     if (useChronos) {
-        chronos.startServer(car.packetInterface());
+        qDebug() << "CHRONOS!!!";
+        if (!chronosHostAddr.isEmpty()) {
+            QHostAddress addr(chronosHostAddr);
+            if (!addr.isNull()) {
+                if (QNetworkInterface::allAddresses().contains(addr)) {
+                    chronos.startServer(car.packetInterface(), addr);
+                    chronos.comm()->setTransmitterId(addr.toIPv4Address() & 0xFF);
+                } else {
+                    chronos.startServer(car.packetInterface());
+                    qWarning() << "There is no interface with address" <<
+                                  chronosHostAddr;
+                }
+            } else {
+                chronos.startServer(car.packetInterface());
+                qWarning() << chronosHostAddr << "is not a valid address";
+            }
+        } else {
+            chronos.startServer(car.packetInterface());
+        }
+
+        if (chronosTxId >= 0) {
+            chronos.comm()->setTransmitterId(chronosTxId);
+        }
 
         // In case we simulate, use CHRONOS-compatible settings
         CarSim *sim = car.getSimulatedCar(simulateCarFirst);

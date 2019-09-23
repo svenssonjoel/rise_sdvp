@@ -39,8 +39,8 @@
 #define MAIN_MODE_IS_BASE			(MAIN_MODE == MAIN_MODE_M8T_BASE_2400 || MAIN_MODE == MAIN_MODE_M8T_BASE_400)
 
 // Firmware version
-#define FW_VERSION_MAJOR			10
-#define FW_VERSION_MINOR			2
+#define FW_VERSION_MAJOR			12
+#define FW_VERSION_MINOR			1
 
 // Default car settings
 //#define CAR_TERO // Benjamins tero car
@@ -55,6 +55,44 @@
 #endif
 #ifndef DIFF_STEERING_VESC_RIGHT
 #define DIFF_STEERING_VESC_RIGHT	1
+#endif
+
+// Hydraulic drive
+#ifndef HAS_HYDRAULIC_DRIVE
+#define HAS_HYDRAULIC_DRIVE			0
+#endif
+
+// VESC for steering
+// ID of VESC for steering.
+// -1: No steering VESC
+#ifndef SERVO_VESC_ID
+#define SERVO_VESC_ID				-1
+#endif
+/*
+ * Angle should be increasing from S1 to S2 (possibly
+ * passing 0). The steering mapping is done on top
+ * of S1 and S2.
+ */
+#ifndef SERVO_VESC_S1
+#define SERVO_VESC_S1				331.0
+#endif
+#ifndef SERVO_VESC_S2
+#define SERVO_VESC_S2				30.0
+#endif
+#ifndef SERVO_VESC_P_GAIN
+#define SERVO_VESC_P_GAIN			2.0
+#endif
+#ifndef SERVO_VESC_I_GAIN
+#define SERVO_VESC_I_GAIN			1.0
+#endif
+#ifndef SERVO_VESC_D_GAIN
+#define SERVO_VESC_D_GAIN			0.1
+#endif
+#ifndef SERVO_VESC_D_FILTER
+#define SERVO_VESC_D_FILTER			0.05
+#endif
+#ifndef SERVO_VESC_INVERTED
+#define SERVO_VESC_INVERTED			0
 #endif
 
 // Ublox settings
@@ -76,13 +114,6 @@
 // Log configuration to enable. Choose one only.
 //#define LOG_EN_CARREL
 //#define LOG_EN_ITRANSIT
-//#define LOG_EN_DW
-
-// Anchor IDs to range against in DW logging mode. -1 to disable.
-#define LOG_DW_ANCHOR0				122
-#define LOG_DW_ANCHOR1				234
-#define LOG_DW_ANCHOR2				35
-#define LOG_DW_FORCE_CC1120			1
 
 // CC2520 Settings
 #define CC2520_RF_CHANNEL			12
@@ -93,7 +124,9 @@
 // General settings
 #define ID_ALL						255
 #define ID_CAR_CLIENT				254 // Packet for car client only
+#ifndef VESC_ID
 #define VESC_ID						ID_ALL // id, or ID_ALL for any VESC (not used in diff steering mode)
+#endif
 #define ID_MOTE						254 // If the packet is for the mote and not to be forwarded in mote mode
 
 #ifdef CAR_TERO
@@ -107,30 +140,13 @@
 #define BOARD_YAW_ROT				-90.0
 #endif
 
-// Radar settings
-#ifndef RADAR_EN
-#define RADAR_EN					0
-#endif
-#define RADAR_CENTER_FREQ			76.5e9
-#define RADAR_FREQ_SPAN				1.0e9
-#define RADAR_FREQ_PONTS			1024
-#define RADAR_SWEEP_TIME			0.075
-#define RADAR_MAP_PLOT_AVG_FACTOR	3.0
-#define RADAR_MAP_PLOT_MAX_DIV		6.0
-#define RADAR_PLOT_MODE				0
-#define RADAR_MAP_PLOT_START		20
-#define RADAR_MAP_PLOT_END			300
-
-// radar_cont
-#define RADAR_CONT_EN				0
-
 // Servo settings
 #define SERVO_OUT_RATE_HZ			50
 #define SERVO_OUT_PULSE_MIN_US		1000
 #define SERVO_OUT_PULSE_MAX_US		2000
 
 // Autopilot settings
-#define AP_ROUTE_SIZE				500
+#define AP_ROUTE_SIZE				1000
 
 // Global variables
 extern MAIN_CONFIG main_config;

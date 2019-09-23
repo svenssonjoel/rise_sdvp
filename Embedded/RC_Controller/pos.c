@@ -35,6 +35,7 @@
 #include "terminal.h"
 #include "pos_uwb.h"
 #include "comm_can.h"
+#include "hydraulic.h"
 
 // Defines
 #define ITERATION_TIMER_FREQ			50000
@@ -50,7 +51,6 @@ static float m_gyro[3];
 static float m_mag[3];
 static float m_mag_raw[3];
 static mc_values m_mc_val;
-static float m_imu_yaw;
 static float m_imu_yaw_offset;
 static mutex_t m_mutex_pos;
 static mutex_t m_mutex_gps;
@@ -90,6 +90,7 @@ static void ubx_rx_rawx(ubx_rxm_rawx *rawx);
 
 #if MAIN_MODE == MAIN_MODE_CAR
 static void mc_values_received(mc_values *val);
+static void car_update_pos(float distance, float turn_rad_rear, float angle_diff, float speed);
 #elif MAIN_MODE == MAIN_MODE_MULTIROTOR
 static void srf_distance_received(float distance);
 #endif
@@ -104,7 +105,6 @@ void pos_init(void) {
 	memset(&m_pos, 0, sizeof(m_pos));
 	memset(&m_gps, 0, sizeof(m_gps));
 	memset(&m_mc_val, 0, sizeof(m_mc_val));
-	m_imu_yaw = 0.0;
 	m_ubx_pos_valid = true;
 	m_nma_last_time = 0;
 	memset(&m_pos_history, 0, sizeof(m_pos_history));
@@ -296,7 +296,7 @@ void pos_set_xya(float x, float y, float angle) {
 	m_pos.px = x;
 	m_pos.py = y;
 	m_pos.yaw = angle;
-	m_imu_yaw_offset = m_imu_yaw - angle;
+	m_imu_yaw_offset = m_pos.yaw_imu - angle;
 	m_yaw_imu_clamp = angle;
 
 	chMtxUnlock(&m_mutex_gps);
@@ -308,7 +308,7 @@ void pos_set_yaw_offset(float angle) {
 
 	m_imu_yaw_offset = angle;
 	utils_norm_angle(&m_imu_yaw_offset);
-	m_pos.yaw = m_imu_yaw - m_imu_yaw_offset;
+	m_pos.yaw = m_pos.yaw_imu - m_imu_yaw_offset;
 	utils_norm_angle(&m_pos.yaw);
 	m_yaw_imu_clamp = m_pos.yaw;
 
@@ -768,6 +768,33 @@ static void mpu9150_read(void) {
 	if (mc_read_cnt >= 10) {
 		mc_read_cnt = 0;
 		bldc_interface_get_values();
+
+#if HAS_HYDRAULIC_DRIVE
+		float turn_rad_rear = 0.0;
+		float angle_diff = 0.0;
+		float distance = hydraulic_get_distance(true);
+		float speed = hydraulic_get_speed();
+
+		float steering_angle = (servo_simple_get_pos_now()
+				- main_config.car.steering_center)
+							* ((2.0 * main_config.car.steering_max_angle_rad)
+									/ main_config.car.steering_range);
+
+		if (fabsf(steering_angle) >= 1e-6) {
+			turn_rad_rear = main_config.car.axis_distance / tanf(steering_angle);
+			float turn_rad_front = sqrtf(
+					main_config.car.axis_distance * main_config.car.axis_distance
+					+ turn_rad_rear * turn_rad_rear);
+
+			if (turn_rad_rear < 0) {
+				turn_rad_front = -turn_rad_front;
+			}
+
+			angle_diff = (distance * 2.0) / (turn_rad_rear + turn_rad_front);
+		}
+
+		car_update_pos(distance, turn_rad_rear, angle_diff, speed);
+#endif
 	}
 #endif
 #endif
@@ -925,32 +952,32 @@ static void update_orientation_angles(float *accel, float *gyro, float *mag, flo
 		yaw_now += SIGN(diff) * main_config.yaw_mag_gain * M_PI / 180.0 * dt;
 		utils_norm_angle_rad(&yaw_now);
 
-		m_imu_yaw = yaw_now * 180.0 / M_PI;
+		m_pos.yaw_imu = yaw_now * 180.0 / M_PI;
 	} else {
-		m_imu_yaw = yaw * 180.0 / M_PI;
+		m_pos.yaw_imu = yaw * 180.0 / M_PI;
 	}
 
-	utils_norm_angle(&m_imu_yaw);
+	utils_norm_angle(&m_pos.yaw_imu);
 	m_pos.yaw_rate = -m_gyro[2] * 180.0 / M_PI;
 
 	// Correct yaw
 #if MAIN_MODE == MAIN_MODE_CAR
 	{
 		if (!m_yaw_imu_clamp_set) {
-			m_yaw_imu_clamp = m_imu_yaw - m_imu_yaw_offset;
+			m_yaw_imu_clamp = m_pos.yaw_imu - m_imu_yaw_offset;
 			m_yaw_imu_clamp_set = true;
 		}
 
 		if (main_config.car.clamp_imu_yaw_stationary && fabsf(m_pos.speed) < 0.05) {
-			m_imu_yaw_offset = m_imu_yaw - m_yaw_imu_clamp;
+			m_imu_yaw_offset = m_pos.yaw_imu - m_yaw_imu_clamp;
 		} else {
-			m_yaw_imu_clamp = m_imu_yaw - m_imu_yaw_offset;
+			m_yaw_imu_clamp = m_pos.yaw_imu - m_imu_yaw_offset;
 		}
 	}
 
 	if (main_config.car.yaw_use_odometry) {
 		if (main_config.car.yaw_imu_gain > 1e-10) {
-			float ang_diff = utils_angle_difference(m_pos.yaw, m_imu_yaw - m_imu_yaw_offset);
+			float ang_diff = utils_angle_difference(m_pos.yaw, m_pos.yaw_imu - m_imu_yaw_offset);
 
 			if (ang_diff > 1.2 * main_config.car.yaw_imu_gain) {
 				m_pos.yaw -= main_config.car.yaw_imu_gain;
@@ -964,11 +991,11 @@ static void update_orientation_angles(float *accel, float *gyro, float *mag, flo
 			}
 		}
 	} else {
-		m_pos.yaw = m_imu_yaw - m_imu_yaw_offset;
+		m_pos.yaw = m_pos.yaw_imu - m_imu_yaw_offset;
 		utils_norm_angle(&m_pos.yaw);
 	}
 #else
-	m_pos.yaw = m_imu_yaw - m_yaw_offset_gps;
+	m_pos.yaw = m_pos.yaw_imu - m_imu_yaw_offset;
 	utils_norm_angle(&m_pos.yaw);
 #endif
 
@@ -1251,6 +1278,7 @@ static void mc_values_received(mc_values *val) {
 
 	m_mc_val = *val;
 
+#if !HAS_HYDRAULIC_DRIVE
 	static float last_tacho = 0;
 	static bool tacho_read = false;
 
@@ -1317,6 +1345,15 @@ static void mc_values_received(mc_values *val) {
 	}
 #endif
 
+	float speed = rpm * main_config.car.gear_ratio
+			* (2.0 / main_config.car.motor_poles) * (1.0 / 60.0)
+			* main_config.car.wheel_diam * M_PI;
+
+	car_update_pos(distance, turn_rad_rear, angle_diff, speed);
+#endif
+}
+
+static void car_update_pos(float distance, float turn_rad_rear, float angle_diff, float speed) {
 	chMtxLock(&m_mutex_pos);
 
 	if (fabsf(distance) > 1e-6) {
@@ -1338,18 +1375,14 @@ static void mc_values_received(mc_values *val) {
 		}
 	}
 
-	m_pos.speed = rpm * main_config.car.gear_ratio
-			* (2.0 / main_config.car.motor_poles) * (1.0 / 60.0)
-			* main_config.car.wheel_diam * M_PI;
+	m_pos.speed = speed;
 
-	// TODO: eventually use yaw from IMU and implement yaw correction
-	pos_uwb_update_dr(m_pos.yaw, distance, turn_rad_rear, m_pos.speed);
-	//	pos_uwb_update_dr(m_imu_yaw, distance, steering_angle, m_pos.speed);
-
+	pos_uwb_update_dr(m_pos.yaw_imu, m_pos.yaw, distance, turn_rad_rear, m_pos.speed);
 	save_pos_history();
 
 	chMtxUnlock(&m_mutex_pos);
 }
+
 #endif
 
 #if MAIN_MODE == MAIN_MODE_MULTIROTOR

@@ -1,5 +1,5 @@
 /*
-    Copyright 2016-2017 Benjamin Vedder	benjamin@vedder.se
+    Copyright 2016 - 2019 Benjamin Vedder	benjamin@vedder.se
 
     This program is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
@@ -22,10 +22,12 @@
 #include <QVector>
 #include <QTimer>
 #include <QUdpSocket>
+#include <QElapsedTimer>
 #include "datatypes.h"
 #include "mapwidget.h"
 #include "packetinterface.h"
 #include "tcpserversimple.h"
+#include "imagewidget.h"
 
 #ifdef HAS_OPENGL
 #include "orientationwidget.h"
@@ -45,6 +47,7 @@ public:
     void setID(int id);
     int getId();
     bool pollData();
+    void setPollData(bool poll);
     bool updateRouteFromMap();
     void setOrientation(double roll, double pitch, double yaw);
     void setStateData(CAR_STATE data);
@@ -56,6 +59,7 @@ public:
     void setCtrlKb();
     bool setAp(bool on);
     void disableKbBox();
+    void toggleCameraFullscreen();
 
 signals:
     void terminalCmd(quint8 id, QString cmd);
@@ -79,18 +83,13 @@ private slots:
     void plotDataReceived(quint8 id, double x, double y);
     void plotAddGraphReceived(quint8 id, QString name);
     void plotSetGraphReceived(quint8 id, int graph);
-    void radarSetupReceived(quint8 id, radar_settings_t s);
-    void radarSamplesReceived(quint8 id, QVector<QPair<double, double> > samples);
-    void dwSampleReceived(quint8 id, DW_LOG_INFO dw);
-    void updateAnchorsMap();
     void loadMagCal();
+    void cameraImageReceived(quint8 id, QImage image, int bytes);
 
     void on_terminalSendButton_clicked();
     void on_terminalSendVescButton_clicked();
-    void on_terminalSendRadarButton_clicked();
     void on_terminalClearButton_clicked();
     void on_idBox_valueChanged(int arg1);
-    void on_bldcToolUdpBox_toggled(bool checked);
     void on_vescToolTcpBox_toggled(bool checked);
     void on_autopilotBox_toggled(bool checked);
     void on_clearRouteButton_clicked();
@@ -99,23 +98,19 @@ private slots:
     void on_confReadButton_clicked();
     void on_confReadDefaultButton_clicked();
     void on_confWriteButton_clicked();
-    void on_radarReadButton_clicked();
-    void on_radarWriteButton_clicked();
-    void on_radarGetRadCCButton_clicked();
     void on_setClockButton_clicked();
     void on_setClockPiButton_clicked();
     void on_rebootPiButton_clicked();
     void on_shutdownPiButton_clicked();
-    void on_dwAnch0GetButton_clicked();
-    void on_dwAnch1GetButton_clicked();
-    void on_dwAnch2GetButton_clicked();
-    void on_dwClearSamplesButton_clicked();
     void on_experimentSavePngButton_clicked();
     void on_experimentSavePdfButton_clicked();
     void on_experimentSaveXmlButton_clicked();
     void on_experimentLoadXmlButton_clicked();
     void on_experimentHZoomButton_toggled(bool checked);
     void on_experimentVZoomButton_toggled(bool checked);
+    void on_camStartButton_clicked();
+    void on_camStopButton_clicked();
+    void on_camShowMapBox_toggled(bool checked);
 
 private:
     typedef struct {
@@ -137,7 +132,6 @@ private:
 
     int mId;
     CAR_STATE mLastCarState;
-    QList<DW_LOG_INFO> mDwData;
     QTimer *mTimer;
     QUdpSocket *mUdpSocket;
     QHostAddress mLastHostAddress;
@@ -145,11 +139,15 @@ private:
     TcpServerSimple *mTcpServer;
     bool mExperimentReplot;
     QString mFaultLast;
-    bool settingsReadDone;
+    bool mSettingsReadDone;
+    int mImageByteCnt;
+    int mImageCnt;
+    QElapsedTimer mImageTimer;
+    double mImageFpsFilter;
+    ImageWidget *mFullscreenImage;
 
     void getConfGui(MAIN_CONFIG &conf);
     void setConfGui(MAIN_CONFIG &conf);
-    void plotDwData();
     void updateExperimentZoom();
 
 };

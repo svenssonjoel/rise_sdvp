@@ -21,6 +21,7 @@
 #include <cmath>
 #include <cstring>
 #include <QDebug>
+#include <QTime>
 
 CarSim::CarSim(QObject *parent) : QObject(parent)
 {
@@ -37,6 +38,11 @@ CarSim::CarSim(QObject *parent) : QObject(parent)
     mTimer->start(10);
     mUdpSocket = new QUdpSocket(this);
     mDynoConnected = false;
+    mUwbBroadcast = new TcpBroadcast(this);
+    mUwbBroadcastTimer = new QTimer(this);
+    mUwbBroadcastAnchorNow = 0;
+    mLogBroadcastTimer = new QTimer(this);
+    mFi = new FI(this);
 
     // Default car parameters
     mCarTurnRad = 1.0;
@@ -60,6 +66,13 @@ CarSim::CarSim(QObject *parent) : QObject(parent)
             this, SLOT(setSteeringTurnRad(double)));
     connect(mUdpSocket, SIGNAL(readyRead()),
             this, SLOT(readPendingDatagrams()));
+    connect(mUwbBroadcastTimer, SIGNAL(timeout()),
+            this, SLOT(uwbBroadcastTimerSlot()));
+    connect(mLogBroadcastTimer, SIGNAL(timeout()),
+            this, SLOT(logBroadcastTimerSlot()));
+    connect(mFi, &FI::sendPrint, [this](QString s) {
+        commPrintf(s);
+    });
 }
 
 void CarSim::processData(QByteArray data)
@@ -201,6 +214,92 @@ void CarSim::timerSlot()
     }
 }
 
+void CarSim::uwbBroadcastTimerSlot()
+{
+    if (!mUwbAnchors.isEmpty()) {
+        if (mUwbBroadcastAnchorNow >= mUwbAnchors.size()) {
+            mUwbBroadcastAnchorNow = 0;
+        }
+
+        UWB_ANCHOR &a = mUwbAnchors[mUwbBroadcastAnchorNow++];
+        const double dx = a.px - mSimState.px;
+        const double dy = a.py - mSimState.py;
+        float d = sqrt(dx * dx + dy * dy);
+
+        mFi->fi_inject_fault_float(QString("uwb_range_%1").arg(a.id).toLocal8Bit().data(), &d);
+
+        mUwbBroadcast->broadcastData(QString("UWB_RANGE %1 %2 %3 %4\r\n").
+                                     arg(a.id).arg(a.px).arg(a.py).arg(d).toLocal8Bit());
+    }
+}
+
+void CarSim::logBroadcastTimerSlot()
+{
+    float travel_dist = (double)mMotor->tacho() * mGearRatio
+            * (2.0 / (double)mMotor->poles()) * (1.0 / 6.0)
+            * mWheelDiam * M_PI;
+    float yaw = mSimState.yaw;
+
+    mFi->fi_inject_fault_float("uwb_travel_dist", &travel_dist);
+    mFi->fi_inject_fault_float("uwb_yaw", &yaw);
+
+    QString msg = QString::asprintf(
+                "%u,"     // timestamp (ms)
+                "%u,"     // timestamp pos today (ms)
+                "%.3f,"   // car x
+                "%.3f,"   // car y
+                "%.2f,"   // roll
+                "%.2f,"   // pitch
+                "%.2f,"   // yaw
+                "%.2f,"   // roll rate
+                "%.2f,"   // pitch rate
+                "%.2f,"   // yaw rate
+                "%.2f,"   // accel_x
+                "%.2f,"   // accel_y
+                "%.2f,"   // accel_z
+                "%.2f,"   // mag_x
+                "%.2f,"   // mag_y
+                "%.2f,"   // mag_z
+                "%.3f,"   // speed
+                "%d,"     // tachometer
+                "%u,"     // timestamp gps sample today (ms)
+                "%.7f,"   // lat
+                "%.7f,"   // lon
+                "%.3f,"  // height
+                "%.3f,"  // Travel distance
+                "%.2f\r\n",  // Yaw IMU
+                0,
+                QTime::currentTime().msecsSinceStartOfDay(),
+                mSimState.px,
+                mSimState.py,
+                mSimState.roll,
+                mSimState.pitch,
+                yaw,
+                mSimState.roll_rate,
+                mSimState.pitch_rate,
+                mSimState.yaw_rate,
+                mSimState.accel_x,
+                mSimState.accel_y,
+                mSimState.accel_z,
+                0.0,
+                0.0,
+                0.0,
+                mSimState.speed,
+                mMotor->tacho(),
+                0,
+                0.0,
+                0.0,
+                0.0,
+                travel_dist,
+                yaw);
+
+    VByteArray pkt;
+    pkt.vbAppendUint8(mId);
+    pkt.vbAppendUint8(CMD_LOG_ETHERNET);
+    pkt.append(msg.toLocal8Bit());
+    sendPacket(pkt);
+}
+
 void CarSim::readPendingDatagrams()
 {
     while (mUdpSocket->hasPendingDatagrams()) {
@@ -253,6 +352,28 @@ void CarSim::setAxisDistance(double axisDistance)
     mAutoPilot->setAxisDistance(mAxisDistance);
 }
 
+bool CarSim::startUwbBroadcast(int port, int rateHz)
+{
+    bool res = mUwbBroadcast->startTcpServer(port);
+
+    if (res) {
+        mUwbBroadcastTimer->start(1000 / rateHz);
+    } else {
+        mUwbBroadcastTimer->stop();
+    }
+
+    return res;
+}
+
+void CarSim::startLogBroadcast(int rateHz)
+{
+    if (rateHz >= 1) {
+        mLogBroadcastTimer->start(1000 / rateHz);
+    } else {
+        mLogBroadcastTimer->stop();
+    }
+}
+
 double CarSim::wheelDiam() const
 {
     return mWheelDiam;
@@ -296,6 +417,16 @@ void CarSim::processPacket(VByteArray vb)
         }
 
         switch (packet_id) {
+        case CMD_TERMINAL_CMD: {
+            // For the scala tests to work
+            QString cmd = vb.vbPopFrontString();
+            if (cmd.startsWith("fi_")) {
+                mFi->processCmd(cmd);
+            } else if (cmd.startsWith("pos_uwb_reset_pos")) {
+                commPrintf("UWB Pos reset\n");
+            }
+        } break;
+
         case CMD_SET_POS:
         case CMD_SET_POS_ACK: {
             mSimState.px = vb.vbPopFrontDouble32(1e4);
@@ -316,10 +447,9 @@ void CarSim::processPacket(VByteArray vb)
             lon = vb.vbPopFrontDouble64(1e16);
             height = vb.vbPopFrontDouble32(1e3);
 
-            // TODO: Use values
-            (void)lat;
-            (void)lon;
-            (void)height;
+            mSimState.enu_lat = lat;
+            mSimState.enu_lon = lon;
+            mSimState.enu_height = height;
 
             // Send ack
             VByteArray ack;
@@ -331,10 +461,9 @@ void CarSim::processPacket(VByteArray vb)
         case CMD_GET_ENU_REF: {
             double llh[3];
 
-            // TODO: Get values
-            llh[0] = 0.0;
-            llh[1] = 0.0;
-            llh[2] = 0.0;
+            llh[0] = mSimState.enu_lat;
+            llh[1] = mSimState.enu_lon;
+            llh[2] = mSimState.enu_height;
 
             VByteArray ret;
             ret.vbAppendUint8(id_ret);
@@ -379,8 +508,8 @@ void CarSim::processPacket(VByteArray vb)
             ret.vbAppendDouble32(mAutoPilot->autopilot_get_rad_now(), 1e6);
             ret.vbAppendInt32(utility::getTimeUtcToday());
             ret.vbAppendInt16(mAutoPilot->autopilot_get_route_left());
-            ret.vbAppendDouble32(0.0, 1e4); // UWB px
-            ret.vbAppendDouble32(0.0, 1e4); // UWB PY
+            ret.vbAppendDouble32(mSimState.px, 1e4); // UWB px
+            ret.vbAppendDouble32(mSimState.py, 1e4); // UWB PY
             sendPacket(ret);
         } break;
 
@@ -410,7 +539,7 @@ void CarSim::processPacket(VByteArray vb)
                 break;
 
             case RC_MODE_CURRENT_BRAKE:
-                mMotor->setControl(MotorSim::MOTOR_CONTROL_CURRENT, throttle);
+                mMotor->setControl(MotorSim::MOTOR_CONTROL_CURRENT_BRAKE, throttle);
                 break;
 
             default:
@@ -425,8 +554,10 @@ void CarSim::processPacket(VByteArray vb)
                 ROUTE_POINT p;
                 p.px = vb.vbPopFrontDouble32(1e4);
                 p.py = vb.vbPopFrontDouble32(1e4);
+                p.pz = vb.vbPopFrontDouble32(1e4);
                 p.speed = vb.vbPopFrontDouble32(1e6);
                 p.time = vb.vbPopFrontInt32();
+                p.attributes = vb.vbPopFrontUint32();
                 bool res = mAutoPilot->autopilot_add_point(&p, first);
                 first = false;
 
@@ -481,8 +612,10 @@ void CarSim::processPacket(VByteArray vb)
                 ROUTE_POINT rp = mAutoPilot->autopilot_get_route_point(i);
                 res.vbAppendDouble32Auto(rp.px);
                 res.vbAppendDouble32Auto(rp.py);
+                res.vbAppendDouble32Auto(rp.pz);
                 res.vbAppendDouble32Auto(rp.speed);
                 res.vbAppendInt32(rp.time);
+                res.vbAppendUint32(rp.attributes);
             }
 
             sendPacket(res);
@@ -505,8 +638,10 @@ void CarSim::processPacket(VByteArray vb)
                 ROUTE_POINT p;
                 p.px = vb.vbPopFrontDouble32(1e4);
                 p.py = vb.vbPopFrontDouble32(1e4);
+                p.pz = vb.vbPopFrontDouble32(1e4);
                 p.speed = vb.vbPopFrontDouble32(1e6);
                 p.time = vb.vbPopFrontInt32();
+                p.attributes = vb.vbPopFrontUint32();
 
                 if (first) {
                     first = !mAutoPilot->autopilot_replace_route(&p);
@@ -528,6 +663,33 @@ void CarSim::processPacket(VByteArray vb)
             int32_t min_diff = vb.vbPopFrontInt32();
 
             mAutoPilot->autopilot_sync_point(point, time, min_diff);
+
+            // Send ack
+            VByteArray ack;
+            ack.vbAppendUint8(id_ret);
+            ack.vbAppendUint8(packet_id);
+            sendPacket(ack);
+        } break;
+
+        case CMD_ADD_UWB_ANCHOR: {
+            UWB_ANCHOR a;
+
+            a.id = vb.vbPopFrontInt16();
+            a.px = vb.vbPopFrontDouble32Auto();
+            a.py = vb.vbPopFrontDouble32Auto();
+            a.height = vb.vbPopFrontDouble32Auto();
+            a.dist_last = 0.0;
+            mUwbAnchors.append(a);
+
+            // Send ack
+            VByteArray ack;
+            ack.vbAppendUint8(id_ret);
+            ack.vbAppendUint8(packet_id);
+            sendPacket(ack);
+        } break;
+
+        case CMD_CLEAR_UWB_ANCHORS: {
+            mUwbAnchors.clear();
 
             // Send ack
             VByteArray ack;
@@ -592,6 +754,15 @@ void CarSim::updateState(double distance, double speed)
     mSimState.speed = speed;
 
     mAutoPilot->updatePositionSpeed(mSimState.px, mSimState.py, mSimState.yaw, mSimState.speed);
+}
+
+void CarSim::commPrintf(QString str)
+{
+    VByteArray pkt;
+    pkt.vbAppendUint8(mId);
+    pkt.vbAppendUint8(CMD_PRINTF);
+    pkt.append(str.toLocal8Bit().data());
+    sendPacket(pkt);
 }
 
 quint8 CarSim::id() const

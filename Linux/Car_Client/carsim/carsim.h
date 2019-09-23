@@ -25,6 +25,8 @@
 #include "vbytearray.h"
 #include "motorsim.h"
 #include "autopilot.h"
+#include "tcpbroadcast.h"
+#include "fi.h"
 
 class CarSim : public QObject
 {
@@ -49,6 +51,9 @@ public:
     double axisDistance() const;
     void setAxisDistance(double axisDistance);
 
+    bool startUwbBroadcast(int port, int rateHz);
+    void startLogBroadcast(int rateHz);
+
 signals:
     void dataToSend(QByteArray data);
 
@@ -62,11 +67,13 @@ public slots:
 
 private slots:
     void timerSlot();
+    void uwbBroadcastTimerSlot();
+    void logBroadcastTimerSlot();
     void readPendingDatagrams();
 
 private:
-    static const quint8 FW_VERSION_MAJOR = 10;
-    static const quint8 FW_VERSION_MINOR = 2;
+    static const quint8 FW_VERSION_MAJOR = 12;
+    static const quint8 FW_VERSION_MINOR = 1;
 
     double mCarTurnRad;
     double mGearRatio;
@@ -88,6 +95,9 @@ private:
         double accel_z;
         double steering;
         double motor_tacho;
+        double enu_lat;
+        double enu_lon;
+        double enu_height;
     } CAR_SIM_STATE;
 
     QTimer *mTimer;
@@ -101,6 +111,12 @@ private:
     unsigned char mCrcLow;
     unsigned char mCrcHigh;
     CAR_SIM_STATE mSimState;
+    TcpBroadcast *mUwbBroadcast;
+    QTimer *mUwbBroadcastTimer;
+    QVector<UWB_ANCHOR> mUwbAnchors;
+    int mUwbBroadcastAnchorNow;
+    QTimer *mLogBroadcastTimer;
+    FI *mFi;
 
     QUdpSocket *mUdpSocket;
     bool mDynoConnected;
@@ -108,6 +124,7 @@ private:
     void processPacket(VByteArray vb);
     void sendPacket(VByteArray data);
     void updateState(double distance, double speed);
+    void commPrintf(QString str);
 
 };
 

@@ -1,5 +1,5 @@
 /*
-    Copyright 2016 - 2017 Benjamin Vedder	benjamin@vedder.se
+    Copyright 2016 - 2019 Benjamin Vedder	benjamin@vedder.se
 
     This program is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
@@ -59,14 +59,17 @@ CarInterface::CarInterface(QWidget *parent) :
 
     // Plots
     ui->experimentPlot->setInteractions(QCP::iRangeDrag | QCP::iRangeZoom);
-    ui->dwPlot->setInteractions(QCP::iRangeDrag | QCP::iRangeZoom);
 
     mMap = 0;
     mPacketInterface = 0;
     mId = 0;
     mExperimentReplot = false;
     mExperimentPlotNow = 0;
-    settingsReadDone = false;
+    mSettingsReadDone = false;
+    mImageByteCnt = 0;
+    mImageCnt = 0;
+    mImageFpsFilter = 0.0;
+    mFullscreenImage = 0;
 
     mTimer = new QTimer(this);
     mTimer->start(20);
@@ -89,23 +92,6 @@ CarInterface::CarInterface(QWidget *parent) :
     ui->experimentPlot->xAxis->grid()->setSubGridVisible(true);
     ui->experimentPlot->yAxis->grid()->setSubGridVisible(true);
 
-    ui->dwPlot->addGraph();
-    ui->dwPlot->graph()->setName("Fusion Error");
-    ui->dwPlot->graph()->setPen(QPen(Qt::blue));
-    ui->dwPlot->addGraph();
-    ui->dwPlot->graph()->setName("GPS Error");
-    ui->dwPlot->graph()->setPen(QPen(Qt::red));
-    ui->dwPlot->addGraph(ui->dwPlot->xAxis, ui->dwPlot->yAxis2);
-    ui->dwPlot->graph()->setName("Current Anchor");
-    ui->dwPlot->graph()->setPen(QPen(Qt::black));
-    ui->dwPlot->graph()->setLineStyle(QCPGraph::lsNone);
-    ui->dwPlot->graph()->setScatterStyle(QCPScatterStyle(QCPScatterStyle::ssCross, 4));
-    ui->dwPlot->legend->setVisible(true);
-    ui->dwPlot->yAxis2->setVisible(true);
-    ui->dwPlot->xAxis->setLabel("Time (s)");
-    ui->dwPlot->yAxis->setLabel("Error (m)");
-    ui->dwPlot->yAxis2->setLabel("Anchor Now");
-
     connect(ui->experimentGraph1Button, &QPushButton::toggled,
             [=]() {mExperimentReplot = true;});
     connect(ui->experimentGraph2Button, &QPushButton::toggled,
@@ -124,6 +110,10 @@ CarInterface::~CarInterface()
         mMap->removeCar(mId);
     }
 
+    if (mFullscreenImage) {
+        delete mFullscreenImage;
+    }
+
     delete ui;
 }
 
@@ -140,6 +130,11 @@ int CarInterface::getId()
 bool CarInterface::pollData()
 {
     return ui->pollBox->isChecked();
+}
+
+void CarInterface::setPollData(bool poll)
+{
+    ui->pollBox->setChecked(poll);
 }
 
 bool CarInterface::updateRouteFromMap()
@@ -264,40 +259,6 @@ void CarInterface::setMap(MapWidget *map)
             this, SLOT(routePointSet(LocPoint)));
     connect(mMap, SIGNAL(lastRoutePointRemoved(LocPoint)),
             this, SLOT(lastRoutePointRemoved()));
-
-    // Anchor updates
-    connect(ui->dwAnch0DrawBox, SIGNAL(toggled(bool)),
-            this, SLOT(updateAnchorsMap()));
-    connect(ui->dwAnch0IdBox, SIGNAL(valueChanged(int)),
-            this, SLOT(updateAnchorsMap()));
-    connect(ui->dwAnch0PxBox, SIGNAL(valueChanged(double)),
-            this, SLOT(updateAnchorsMap()));
-    connect(ui->dwAnch0PyBox, SIGNAL(valueChanged(double)),
-            this, SLOT(updateAnchorsMap()));
-    connect(ui->dwAnch0PzBox, SIGNAL(valueChanged(double)),
-            this, SLOT(updateAnchorsMap()));
-
-    connect(ui->dwAnch1DrawBox, SIGNAL(toggled(bool)),
-            this, SLOT(updateAnchorsMap()));
-    connect(ui->dwAnch1IdBox, SIGNAL(valueChanged(int)),
-            this, SLOT(updateAnchorsMap()));
-    connect(ui->dwAnch1PxBox, SIGNAL(valueChanged(double)),
-            this, SLOT(updateAnchorsMap()));
-    connect(ui->dwAnch1PyBox, SIGNAL(valueChanged(double)),
-            this, SLOT(updateAnchorsMap()));
-    connect(ui->dwAnch1PzBox, SIGNAL(valueChanged(double)),
-            this, SLOT(updateAnchorsMap()));
-
-    connect(ui->dwAnch2DrawBox, SIGNAL(toggled(bool)),
-            this, SLOT(updateAnchorsMap()));
-    connect(ui->dwAnch2IdBox, SIGNAL(valueChanged(int)),
-            this, SLOT(updateAnchorsMap()));
-    connect(ui->dwAnch2PxBox, SIGNAL(valueChanged(double)),
-            this, SLOT(updateAnchorsMap()));
-    connect(ui->dwAnch2PyBox, SIGNAL(valueChanged(double)),
-            this, SLOT(updateAnchorsMap()));
-    connect(ui->dwAnch2PzBox, SIGNAL(valueChanged(double)),
-            this, SLOT(updateAnchorsMap()));
 }
 
 void CarInterface::setPacketInterface(PacketInterface *packetInterface)
@@ -330,12 +291,10 @@ void CarInterface::setPacketInterface(PacketInterface *packetInterface)
             this, SLOT(plotAddGraphReceived(quint8,QString)));
     connect(mPacketInterface, SIGNAL(plotSetGraphReceived(quint8,int)),
             this, SLOT(plotSetGraphReceived(quint8,int)));
-    connect(mPacketInterface, SIGNAL(radarSetupReceived(quint8,radar_settings_t)),
-            this, SLOT(radarSetupReceived(quint8,radar_settings_t)));
-    connect(mPacketInterface, SIGNAL(radarSamplesReceived(quint8,QVector<QPair<double,double> >)),
-            this, SLOT(radarSamplesReceived(quint8,QVector<QPair<double,double> >)));
     connect(mPacketInterface, SIGNAL(dwSampleReceived(quint8,DW_LOG_INFO)),
             this, SLOT(dwSampleReceived(quint8,DW_LOG_INFO)));
+    connect(mPacketInterface, SIGNAL(cameraImageReceived(quint8,QImage,int)),
+            this, SLOT(cameraImageReceived(quint8,QImage,int)));
 }
 
 void CarInterface::setControlValues(double throttle, double steering, double max, bool currentMode)
@@ -398,6 +357,22 @@ void CarInterface::disableKbBox()
     ui->keyboardControlBox->setChecked(false);
 }
 
+void CarInterface::toggleCameraFullscreen()
+{
+    if (mFullscreenImage) {
+        delete mFullscreenImage;
+    } else {
+        mFullscreenImage = new ImageWidget();
+        mFullscreenImage->setWindowFlags(mFullscreenImage->windowFlags() |
+                                         Qt::WindowStaysOnTopHint);
+        mFullscreenImage->showFullScreen();
+
+        connect(mFullscreenImage, &ImageWidget::destroyed, [=]() {
+            mFullscreenImage = 0;
+        });
+    }
+}
+
 void CarInterface::timerSlot()
 {   
     if (mExperimentReplot) {
@@ -417,6 +392,9 @@ void CarInterface::timerSlot()
             ui->experimentPlot->graph()->setData(mExperimentPlots.at(i).xData, mExperimentPlots.at(i).yData);
             ui->experimentPlot->graph()->setName(mExperimentPlots.at(i).label);
             ui->experimentPlot->graph()->setPen(QPen(mExperimentPlots.at(i).color));
+            if (ui->experimentScatterButton->isChecked()) {
+                ui->experimentPlot->graph()->setScatterStyle(QCPScatterStyle(QCPScatterStyle::ssDisc, 5));
+            }
         }
 
         ui->experimentPlot->legend->setVisible(mExperimentPlots.size() > 1);
@@ -453,7 +431,7 @@ void CarInterface::tcpRx(QByteArray &data)
 
 void CarInterface::terminalPrint(quint8 id, QString str)
 {
-    if (id == mId) {
+    if (id == mId || id == 255) {
         ui->terminalBrowser->append(str);
     }
 }
@@ -520,7 +498,7 @@ void CarInterface::nmeaReceived(quint8 id, QByteArray nmea_msg)
 void CarInterface::configurationReceived(quint8 id, MAIN_CONFIG config)
 {
     if (id == mId) {
-        settingsReadDone = true;
+        mSettingsReadDone = true;
         setConfGui(config);
         QString str;
         str.sprintf("Car %d: Configuration Received", id);
@@ -585,138 +563,6 @@ void CarInterface::plotSetGraphReceived(quint8 id, int graph)
     }
 }
 
-void CarInterface::radarSetupReceived(quint8 id, radar_settings_t s)
-{
-    if (id == mId) {
-        ui->radarFCenterBox->setValue(s.f_center / 1e9);
-        ui->radarFSpanBox->setValue(s.f_span / 1e9);
-        ui->radarPointsBox->setValue(s.points);
-        ui->radarTSweepBox->setValue(s.t_sweep);
-        ui->radarCcXBox->setValue(s.cc_x);
-        ui->radarCcYBox->setValue(s.cc_y);
-        ui->radarCRadBox->setValue(s.cc_rad);
-        ui->radarLogRateBox->setValue((double)s.log_rate_ms / 1000.0);
-        ui->radarLogEnBox->setChecked(s.log_en);
-        ui->radarMapPlotAvgFactorBox->setValue(s.map_plot_avg_factor);
-        ui->radarMapPlotMaxDivBox->setValue(s.map_plot_max_div);
-        ui->radarPlotModeBox->setValue(s.plot_mode);
-        ui->radarMapPlotStartBox->setValue(s.map_plot_start);
-        ui->radarMapPlotEndBox->setValue(s.map_plot_end);
-
-        QString str;
-        str.sprintf("Car %d: Radar Setup Received", id);
-        emit showStatusInfo(str, true);
-    }
-}
-
-void CarInterface::radarSamplesReceived(quint8 id, QVector<QPair<double, double> > samples)
-{
-    if (mMap && ui->plotRadarBox->isChecked() && id == mId) {
-        CarInfo *ci = mMap->getCarInfo(mId);
-        if (ci) {
-            LocPoint p_car = ci->getLocation();
-            for (int i = 0;i < samples.size();i++) {
-                LocPoint p;
-
-                double cx = 0;
-                double cy = 0;
-
-                cx = p_car.getX() + samples[i].first * sin(p_car.getYaw());
-                cy = p_car.getY() + samples[i].first * cos(p_car.getYaw());
-                p.setXY(cx, cy);
-                p.setDrawLine(false);
-
-                QString info;
-                QTime t = QTime::currentTime();
-
-                info.sprintf("%02d:%02d:%02d:%03d\n"
-                             "%.1f m (%.0f)",
-                             t.hour(), t.minute(), t.second(), t.msec(),
-                             samples[i].first, samples[i].second);
-
-                p.setInfo(info);
-                mMap->addInfoPoint(p);
-            }
-        }
-    }
-}
-
-void CarInterface::dwSampleReceived(quint8 id, DW_LOG_INFO dw)
-{
-    if (id == mId) {
-        mDwData.append(dw);
-        plotDwData();
-    }
-}
-
-void CarInterface::updateAnchorsMap()
-{
-    if (mMap) {
-        bool update = false;
-
-        LocPoint anch0_gui;
-        anch0_gui.setId(100 * mId + 0);
-        anch0_gui.setXY(ui->dwAnch0PxBox->value(), ui->dwAnch0PyBox->value());
-        anch0_gui.setInfo(QString("Anchor %2").arg(ui->dwAnch0IdBox->value()));
-
-        LocPoint anch1_gui;
-        anch1_gui.setId(100 * mId + 1);
-        anch1_gui.setXY(ui->dwAnch1PxBox->value(), ui->dwAnch1PyBox->value());
-        anch1_gui.setInfo(QString("Anchor %2").arg(ui->dwAnch1IdBox->value()));
-
-        LocPoint anch2_gui;
-        anch2_gui.setId(100 * mId + 2);
-        anch2_gui.setXY(ui->dwAnch2PxBox->value(), ui->dwAnch2PyBox->value());
-        anch2_gui.setInfo(QString("Anchor %2").arg(ui->dwAnch2IdBox->value()));
-
-        LocPoint *anch0 = mMap->getAnchor(anch0_gui.getId());
-        if (ui->dwAnch0DrawBox->isChecked()) {
-            if (anch0) {
-                if (*anch0 != anch0_gui) {
-                    *anch0 = anch0_gui;
-                    update = true;
-                }
-            } else {
-                mMap->addAnchor(anch0_gui);
-            }
-        } else {
-            mMap->removeAnchor(anch0_gui.getId());
-        }
-
-        LocPoint *anch1 = mMap->getAnchor(anch1_gui.getId());
-        if (ui->dwAnch1DrawBox->isChecked()) {
-            if (anch1) {
-                if (*anch1 != anch1_gui) {
-                    *anch1 = anch1_gui;
-                    update = true;
-                }
-            } else {
-                mMap->addAnchor(anch1_gui);
-            }
-        } else {
-            mMap->removeAnchor(anch1_gui.getId());
-        }
-
-        LocPoint *anch2 = mMap->getAnchor(anch2_gui.getId());
-        if (ui->dwAnch2DrawBox->isChecked()) {
-            if (anch2) {
-                if (*anch2 != anch2_gui) {
-                    *anch2 = anch2_gui;
-                    update = true;
-                }
-            } else {
-                mMap->addAnchor(anch2_gui);
-            }
-        } else {
-            mMap->removeAnchor(anch2_gui.getId());
-        }
-
-        if (update) {
-            mMap->update();
-        }
-    }
-}
-
 void CarInterface::loadMagCal()
 {
     if (!ui->magCal->calculateCompensation()) {
@@ -731,6 +577,34 @@ void CarInterface::loadMagCal()
     ui->confCommonWidget->setMagCompCenter(ui->magCal->getCenter());
 }
 
+void CarInterface::cameraImageReceived(quint8 id, QImage image, int bytes)
+{
+    if (id == mId || id == 255) {
+        mImageByteCnt += bytes;
+        mImageCnt++;
+
+        mPacketInterface->sendCameraFrameAck(mId);
+
+        mImageFpsFilter -= 0.1 * (mImageFpsFilter - 1000.0 / (double)mImageTimer.restart());
+
+        ui->camInfoLabel->setText(QString("Total RX: %1 MB | Last RX: %2 KB | "
+                                          "IMG CNT: %3 | FPS: %4").
+                                  arg((double)mImageByteCnt / 1024.0 / 1024.0, 0, 'f', 1).
+                                  arg(bytes / 1024).
+                                  arg(mImageCnt).arg(mImageFpsFilter, 0, 'f', 1));
+
+        if (mFullscreenImage) {
+            mFullscreenImage->setPixmap(QPixmap::fromImage(image));
+        } else {
+            ui->camWidget->setPixmap(QPixmap::fromImage(image));
+
+            if (mMap && ui->camShowMapBox->isChecked()) {
+                mMap->setLastCameraImage(image);
+            }
+        }
+    }
+}
+
 void CarInterface::on_terminalSendButton_clicked()
 {
     emit terminalCmd(mId, ui->terminalEdit->text());
@@ -741,12 +615,6 @@ void CarInterface::on_terminalSendVescButton_clicked()
 {
     emit terminalCmd(mId, "vesc " + ui->terminalEditVesc->text());
     ui->terminalEditVesc->clear();
-}
-
-void CarInterface::on_terminalSendRadarButton_clicked()
-{
-    emit terminalCmd(mId, "radar_cmd " + ui->terminalEditRadar->text());
-    ui->terminalEditRadar->clear();
 }
 
 void CarInterface::on_terminalClearButton_clicked()
@@ -762,21 +630,6 @@ void CarInterface::on_idBox_valueChanged(int arg1)
     }
 
     mId = arg1;
-}
-
-void CarInterface::on_bldcToolUdpBox_toggled(bool checked)
-{
-    if (checked) {
-        if (!mUdpSocket->bind(QHostAddress::Any, mUdpPort)) {
-            qWarning() << "Binding UDP socket failed.";
-            QMessageBox::warning(this, "UDP Server Error",
-                                 "Creating UDP server failed. Make sure that the port is not "
-                                 "already in use.");
-            ui->bldcToolUdpBox->setChecked(false);
-        }
-    } else {
-        mUdpSocket->close();
-    }
 }
 
 void CarInterface::on_vescToolTcpBox_toggled(bool checked)
@@ -858,7 +711,7 @@ void CarInterface::on_confReadDefaultButton_clicked()
 
 void CarInterface::on_confWriteButton_clicked()
 {
-    if (!settingsReadDone) {
+    if (!mSettingsReadDone) {
         QMessageBox::warning(this, "Configuration",
                              "You must read the configuration at least once before writing it. "
                              "Otherwise everything would be set to 0.");
@@ -886,6 +739,7 @@ void CarInterface::getConfGui(MAIN_CONFIG &conf)
     conf.car.disable_motor = ui->confMiscDisableMotorBox->isChecked();
     conf.car.simulate_motor = ui->confMiscSimulateMotorBox->isChecked();
     conf.car.clamp_imu_yaw_stationary = ui->confClampImuYawBox->isChecked();
+    conf.car.use_uwb_pos = ui->confUseUwbPosBox->isChecked();
 
     conf.car.gear_ratio = ui->confGearRatioBox->value();
     conf.car.wheel_diam = ui->confWheelDiamBox->value();
@@ -907,6 +761,7 @@ void CarInterface::setConfGui(MAIN_CONFIG &conf)
     ui->confMiscDisableMotorBox->setChecked(conf.car.disable_motor);
     ui->confMiscSimulateMotorBox->setChecked(conf.car.simulate_motor);
     ui->confClampImuYawBox->setChecked(conf.car.clamp_imu_yaw_stationary);
+    ui->confUseUwbPosBox->setChecked(conf.car.use_uwb_pos);
 
     ui->confGearRatioBox->setValue(conf.car.gear_ratio);
     ui->confWheelDiamBox->setValue(conf.car.wheel_diam);
@@ -921,114 +776,12 @@ void CarInterface::setConfGui(MAIN_CONFIG &conf)
     ui->confCommonWidget->setConfGui(conf);
 }
 
-void CarInterface::plotDwData()
-{
-    QVector<double> time;
-    QVector<double> error;
-    QVector<double> error_gps;
-    QVector<double> anchor;
-
-    for (int i = 0;i < mDwData.size();i++) {
-        DW_LOG_INFO &dw = mDwData[i];
-
-        double px = 0;
-        double py = 0;
-        double pz = 0;
-        double anch = -1.0;
-
-        if (dw.dw_anchor == ui->dwAnch0IdBox->value()) {
-            px = ui->dwAnch0PxBox->value();
-            py = ui->dwAnch0PyBox->value();
-            pz = ui->dwAnch0PzBox->value();
-            anch = 0.0;
-        } else if (dw.dw_anchor == ui->dwAnch1IdBox->value()) {
-            px = ui->dwAnch1PxBox->value();
-            py = ui->dwAnch1PyBox->value();
-            pz = ui->dwAnch1PzBox->value();
-            anch = 1.0;
-        } else if (dw.dw_anchor == ui->dwAnch2IdBox->value()) {
-            px = ui->dwAnch2PxBox->value();
-            py = ui->dwAnch2PyBox->value();
-            pz = ui->dwAnch2PzBox->value();
-            anch = 2.0;
-        }
-
-        double err = fabs(sqrt((dw.px - px) * (dw.px - px) +
-                               (dw.py - py) * (dw.py - py) +
-                               (pz) * (pz)) - dw.dw_dist);
-
-        double err_gps = fabs(sqrt((dw.px_gps - px) * (dw.px_gps - px) +
-                                   (dw.py_gps - py) * (dw.py_gps - py) +
-                                   (pz) * (pz)) - dw.dw_dist);
-
-        time.append((double)dw.time_today_ms / 1000.0);
-        error.append(err);
-        error_gps.append(err_gps);
-        anchor.append(anch);
-    }
-
-    ui->dwPlot->graph(0)->setData(time, error);
-    ui->dwPlot->graph(1)->setData(time, error_gps);
-    ui->dwPlot->graph(2)->setData(time, anchor);
-    ui->dwPlot->rescaleAxes();
-    ui->dwPlot->yAxis->setRangeLower(0.0);
-    ui->dwPlot->yAxis2->setRangeLower(-0.2);
-    ui->dwPlot->yAxis2->setRangeUpper(2.2);
-    ui->dwPlot->replot();
-}
-
 void CarInterface::updateExperimentZoom()
 {
     Qt::Orientations plotOrientations = (Qt::Orientations)
             ((ui->experimentHZoomButton->isChecked() ? Qt::Horizontal : 0) |
              (ui->experimentVZoomButton->isChecked() ? Qt::Vertical : 0));
     ui->experimentPlot->axisRect()->setRangeZoom(plotOrientations);
-}
-
-void CarInterface::on_radarReadButton_clicked()
-{
-    if (mPacketInterface) {
-        mPacketInterface->radarSetupGet(mId);
-    }
-}
-
-void CarInterface::on_radarWriteButton_clicked()
-{
-    radar_settings_t s;
-    s.f_center = ui->radarFCenterBox->value() * 1e9;
-    s.f_span = ui->radarFSpanBox->value() * 1e9;
-    s.points = ui->radarPointsBox->value();
-    s.t_sweep = ui->radarTSweepBox->value();
-    s.cc_x = ui->radarCcXBox->value();
-    s.cc_y = ui->radarCcYBox->value();
-    s.cc_rad = ui->radarCRadBox->value();
-    s.log_rate_ms = (int)(ui->radarLogRateBox->value() * 1000.0);
-    s.log_en = ui->radarLogEnBox->isChecked();
-    s.map_plot_avg_factor = ui->radarMapPlotAvgFactorBox->value();
-    s.map_plot_max_div = ui->radarMapPlotMaxDivBox->value();
-    s.plot_mode = ui->radarPlotModeBox->value();
-    s.map_plot_start = ui->radarMapPlotStartBox->value();
-    s.map_plot_end = ui->radarMapPlotEndBox->value();
-
-    if (mPacketInterface) {
-        ui->radarWriteButton->setEnabled(false);
-        bool ok = mPacketInterface->radarSetupSet(mId, &s);
-        ui->radarWriteButton->setEnabled(true);
-
-        if (!ok) {
-            QMessageBox::warning(this, "Setup Radar",
-                                 "Could not write radar settings.");
-        }
-    }
-}
-
-void CarInterface::on_radarGetRadCCButton_clicked()
-{
-    if (mMap) {
-        CarInfo *car = mMap->getCarInfo(mId);
-        ui->radarCcXBox->setValue(car->getLocation().getX());
-        ui->radarCcYBox->setValue(car->getLocation().getY());
-    }
 }
 
 void CarInterface::on_setClockButton_clicked()
@@ -1075,30 +828,6 @@ void CarInterface::on_shutdownPiButton_clicked()
                                  "connection works.");
         }
     }
-}
-
-void CarInterface::on_dwAnch0GetButton_clicked()
-{
-    ui->dwAnch0PxBox->setValue(mLastCarState.px);
-    ui->dwAnch0PyBox->setValue(mLastCarState.py);
-}
-
-void CarInterface::on_dwAnch1GetButton_clicked()
-{
-    ui->dwAnch1PxBox->setValue(mLastCarState.px);
-    ui->dwAnch1PyBox->setValue(mLastCarState.py);
-}
-
-void CarInterface::on_dwAnch2GetButton_clicked()
-{
-    ui->dwAnch2PxBox->setValue(mLastCarState.px);
-    ui->dwAnch2PyBox->setValue(mLastCarState.py);
-}
-
-void CarInterface::on_dwClearSamplesButton_clicked()
-{
-    mDwData.clear();
-    plotDwData();
 }
 
 void CarInterface::on_experimentSavePngButton_clicked()
@@ -1281,4 +1010,37 @@ void CarInterface::on_experimentVZoomButton_toggled(bool checked)
 {
     (void)checked;
     updateExperimentZoom();
+}
+
+void CarInterface::on_camStartButton_clicked()
+{
+    mImageByteCnt = 0;
+    mImageCnt = 0;
+    mImageTimer.restart();
+
+    if (mPacketInterface) {
+        mPacketInterface->startCameraStream(mId, ui->camCamBox->value(),
+                                            ui->camQualityBox->value(),
+                                            ui->camWidthBox->value(),
+                                            ui->camHeightBox->value(),
+                                            ui->camFpsBox->value(),
+                                            ui->camSkipBox->value());
+    }
+}
+
+void CarInterface::on_camStopButton_clicked()
+{
+    mPacketInterface->startCameraStream(mId, -1, 0, 0, 0, 0, 0);
+    ui->camWidget->setPixmap(QPixmap());
+
+    if (mMap) {
+        mMap->setLastCameraImage(QImage());
+    }
+}
+
+void CarInterface::on_camShowMapBox_toggled(bool checked)
+{
+    if (mMap && !checked) {
+        mMap->setLastCameraImage(QImage());
+    }
 }

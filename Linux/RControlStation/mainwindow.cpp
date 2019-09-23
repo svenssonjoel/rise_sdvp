@@ -69,7 +69,8 @@ MainWindow::MainWindow(QWidget *parent) :
 {
     ui->setupUi(this);
 
-    mVersion = "0.6";
+    mVersion = "0.8";
+    mSupportedFirmwares.append(qMakePair(12, 1));
 
     qRegisterMetaType<LocPoint>("LocPoint");
 
@@ -86,13 +87,15 @@ MainWindow::MainWindow(QWidget *parent) :
 #ifdef HAS_JOYSTICK
     mJoystick = new Joystick(this);
     mJsType = JS_TYPE_HK;
+
+    connect(mJoystick, SIGNAL(buttonChanged(int,bool)),
+            this, SLOT(jsButtonChanged(int,bool)));
 #endif
 
     mPing = new Ping(this);
     mNmea = new NmeaServer(this);
     mUdpSocket = new QUdpSocket(this);
-    mTcpSocket = new QTcpSocket(this);
-    mTcpSocket->setSocketOption(QAbstractSocket::LowDelayOption, true);
+    mTcpClientMulti = new TcpClientMulti(this);
     mUdpSocket->setSocketOption(QAbstractSocket::LowDelayOption, true);
 
     mIntersectionTest = new IntersectionTest(this);
@@ -152,17 +155,52 @@ MainWindow::MainWindow(QWidget *parent) :
             this, SLOT(routePointAdded(LocPoint)));
     connect(ui->mapWidget, SIGNAL(infoTraceChanged(int)),
             this, SLOT(infoTraceChanged(int)));
-    connect(mTcpSocket, SIGNAL(readyRead()), this, SLOT(tcpInputDataAvailable()));
-    connect(mTcpSocket, SIGNAL(connected()), this, SLOT(tcpInputConnected()));
-    connect(mTcpSocket, SIGNAL(disconnected()),
-            this, SLOT(tcpInputDisconnected()));
-    connect(mTcpSocket, SIGNAL(error(QAbstractSocket::SocketError)),
-            this, SLOT(tcpInputError(QAbstractSocket::SocketError)));
 
     connect(ui->actionAboutQt, SIGNAL(triggered(bool)),
             qApp, SLOT(aboutQt()));
 
+    connect(mTcpClientMulti, &TcpClientMulti::packetRx, [this](QByteArray data) {
+        mPacketInterface->processPacket((unsigned char*)data.data(), data.size());
+    });
+
+    connect(mTcpClientMulti, &TcpClientMulti::stateChanged, [this](QString msg, bool isError) {
+        showStatusInfo(msg, !isError);
+
+        if (isError) {
+            qWarning() << "TCP Error:" << msg;
+            QMessageBox::warning(this, "TCP Error", msg);
+        }
+    });
+
     on_serialRefreshButton_clicked();
+    on_mapCameraWidthBox_valueChanged(ui->mapCameraWidthBox->value());
+    on_mapCameraOpacityBox_valueChanged(ui->mapCameraOpacityBox->value());
+
+#ifdef HAS_JOYSTICK
+    // Connect micronav joystick by default
+    bool connectJs = false;
+
+    {
+        Joystick js;
+        if (js.init(ui->jsPortEdit->text()) == 0) {
+            if (js.getName().contains("micronav one", Qt::CaseInsensitive)) {
+                connectJs = true;
+            }
+        }
+    }
+
+    if (connectJs) {
+        on_jsConnectButton_clicked();
+    }
+#endif
+
+
+#ifdef HAS_SIM_SCEN
+    mSimScen = new PageSimScen;
+    ui->mainTabWidget->addTab(mSimScen, QIcon(":/models/Icons/Sedan-96.png"), "");
+    ui->mainTabWidget->setTabToolTip(ui->mainTabWidget->count() - 1,
+                                     "Simulation Scenarios");
+#endif
 
     qApp->installEventFilter(this);
 }
@@ -201,6 +239,15 @@ bool MainWindow::eventFilter(QObject *object, QEvent *e)
         QKeyEvent *keyEvent = static_cast<QKeyEvent *>(e);
         if (keyEvent->key() == Qt::Key_Escape) {
             on_stopButton_clicked();
+            return true;
+        }
+    }
+
+    // Handle F10 here as it won't be detected from the camera window otherwise.
+    if (e->type() == QEvent::KeyPress) {
+        QKeyEvent *keyEvent = static_cast<QKeyEvent *>(e);
+        if (keyEvent->key() == Qt::Key_F10) {
+            on_actionToggleCameraFullscreen_triggered();
             return true;
         }
     }
@@ -245,6 +292,78 @@ bool MainWindow::eventFilter(QObject *object, QEvent *e)
     }
 
     return false;
+}
+
+void MainWindow::addCar(int id, bool pollData)
+{
+    CarInterface *car = new CarInterface(this);
+    mCars.append(car);
+    QString name;
+    name.sprintf("Car %d", id);
+    car->setID(id);
+    ui->carsWidget->addTab(car, name);
+    car->setMap(ui->mapWidget);
+    car->setPacketInterface(mPacketInterface);
+    car->setPollData(pollData);
+    connect(car, SIGNAL(showStatusInfo(QString,bool)), this, SLOT(showStatusInfo(QString,bool)));
+}
+
+void MainWindow::connectJoystick(QString dev)
+{
+#ifdef HAS_JOYSTICK
+    if (mJoystick->init(dev) == 0) {
+        qDebug() << "JS Axes:" << mJoystick->numAxes();
+        qDebug() << "JS Buttons:" << mJoystick->numButtons();
+        qDebug() << "JS Name:" << mJoystick->getName();
+
+        if (mJoystick->getName().contains("Sony PLAYSTATION(R)3")) {
+            mJsType = JS_TYPE_PS3;
+            qDebug() << "Treating joystick as PS3 USB controller.";
+            showStatusInfo("PS4 USB joystick connected!", true);
+        } else if (mJoystick->getName().contains("sony", Qt::CaseInsensitive) ||
+                   mJoystick->getName().contains("wireless controller", Qt::CaseInsensitive)) {
+            mJsType = JS_TYPE_PS4;
+            qDebug() << "Treating joystick as PS4 USB controller.";
+            showStatusInfo("PS4 USB joystick connected!", true);
+        } else if (mJoystick->getName().contains("micronav one", Qt::CaseInsensitive)) {
+            mJsType = JS_TYPE_MICRONAV_ONE;
+            qDebug() << "Treating joystick as Micronav One.";
+            showStatusInfo("Micronav One joystick connected!", true);
+            mJoystick->setRepeats(10, true);
+            mJoystick->setRepeats(14, true);
+        } else {
+            mJsType = JS_TYPE_HK;
+            qDebug() << "Treating joystick as hobbyking simulator.";
+            showStatusInfo("HK joystick connected!", true);
+        }
+    } else {
+        qWarning() << "Opening joystick failed.";
+        showStatusInfo("Opening joystick failed.", false);
+    }
+#else
+    QMessageBox::warning(this, "Joystick",
+                         "This build does not have joystick support.");
+#endif
+}
+
+void MainWindow::addTcpConnection(QString ip, int port)
+{
+    mTcpClientMulti->addConnection(ip, port);
+}
+
+void MainWindow::setNetworkTcpEnabled(bool enabled, int port)
+{
+    ui->networkInterface->setTcpEnabled(enabled, port);
+}
+
+void MainWindow::setNetworkUdpEnabled(bool enabled, int port)
+{
+    ui->networkInterface->setUdpEnabled(enabled, port);
+}
+
+MapWidget *MainWindow::map()
+{
+    return ui->mapWidget;
 }
 
 void MainWindow::serialDataAvailable()
@@ -304,10 +423,23 @@ void MainWindow::timerSlot()
             utility::truncate_number_abs(&js_mr_roll, 1.0);
             utility::truncate_number_abs(&js_mr_pitch, 1.0);
             utility::truncate_number_abs(&js_mr_yaw, 1.0);
-        } else if (mJsType == JS_TYPE_PS4 || mJsType == JS_TYPE_PS3) {
+        } else if (mJsType == JS_TYPE_MICRONAV_ONE) {
             mThrottle = -(double)mJoystick->getAxis(1) / 32768.0;
             deadband(mThrottle,0.1, 1.0);
             mSteering = (double)mJoystick->getAxis(2) / 32768.0;
+
+            js_mr_thr = ((-(double)mJoystick->getAxis(1) / 32768.0) + 0.85) / 1.7;
+            js_mr_roll = (double)mJoystick->getAxis(2) / 32768.0;
+            js_mr_pitch = (double)mJoystick->getAxis(3) / 32768.0;
+            js_mr_yaw = (double)mJoystick->getAxis(0) / 32768.0;
+            utility::truncate_number(&js_mr_thr, 0.0, 1.0);
+            utility::truncate_number_abs(&js_mr_roll, 1.0);
+            utility::truncate_number_abs(&js_mr_pitch, 1.0);
+            utility::truncate_number_abs(&js_mr_yaw, 1.0);
+        } else if (mJsType == JS_TYPE_PS4 || mJsType == JS_TYPE_PS3) {
+            mThrottle = -(double)mJoystick->getAxis(1) / 32768.0;
+            deadband(mThrottle,0.1, 1.0);
+            mSteering = (double)mJoystick->getAxis(3) / 32768.0;
         }
 
         //mSteering /= 2.0;
@@ -357,7 +489,7 @@ void MainWindow::timerSlot()
             mStatusLabel->setStyleSheet(qApp->styleSheet());
         }
     } else {
-        if (mSerialPort->isOpen() || mPacketInterface->isUdpConnected() || mTcpSocket->isOpen()) {
+        if (mSerialPort->isOpen() || mPacketInterface->isUdpConnected() || mTcpClientMulti->isAnyConnected()) {
             mStatusLabel->setText("Connected");
         } else {
             mStatusLabel->setText("Not connected");
@@ -467,13 +599,19 @@ void MainWindow::packetDataToSend(QByteArray &data)
         mSerialPort->write(data);
     }
 
-    if (mTcpSocket->isOpen()) {
-        mTcpSocket->write(data);
-    }
+    mTcpClientMulti->sendAll(data);
 }
 
 void MainWindow::stateReceived(quint8 id, CAR_STATE state)
 {
+    if (!mSupportedFirmwares.contains(qMakePair(state.fw_major, state.fw_minor))) {
+        on_disconnectButton_clicked();
+        QMessageBox::warning(this, "Unsupported Firmware",
+                             "This version of RControlStation is not compatible with the "
+                             "firmware of the connected car. Update RControlStation, the car "
+                             "firmware or both.");
+    }
+
     for(QList<CarInterface*>::Iterator it_car = mCars.begin();it_car < mCars.end();it_car++) {
         CarInterface *car = *it_car;
         if (car->getId() == id) {
@@ -550,7 +688,7 @@ void MainWindow::enuRx(quint8 id, double lat, double lon, double height)
 void MainWindow::nmeaGgaRx(int fields, NmeaServer::nmea_gga_info_t gga)
 {
     if (fields >= 5) {
-        if (gga.fix_type == 4 || gga.fix_type == 5 ||
+        if (gga.fix_type == 4 || gga.fix_type == 5 || gga.fix_type == 2 ||
                 (gga.fix_type == 1 && !ui->mapStreamNmeaRtkOnlyBox->isChecked())) {
             double i_llh[3];
 
@@ -590,10 +728,12 @@ void MainWindow::nmeaGgaRx(int fields, NmeaServer::nmea_gga_info_t gga)
 
             info.sprintf("Fix type: %s\n"
                          "Sats    : %d\n"
-                         "Height  : %.2f",
+                         "Height  : %.2f\n"
+                         "Age     : %.2f",
                          fix_t.toLocal8Bit().data(),
                          gga.n_sat,
-                         gga.height);
+                         gga.height,
+                         gga.diff_age);
 
             p.setInfo(info);
             ui->mapWidget->addInfoPoint(p);
@@ -675,48 +815,50 @@ void MainWindow::infoTraceChanged(int traceNow)
     ui->mapInfoTraceBox->setValue(traceNow);
 }
 
-void MainWindow::tcpInputConnected()
+void MainWindow::jsButtonChanged(int button, bool pressed)
 {
-    showStatusInfo(tr("TCP Connected"), true);
-}
+//    qDebug() << "JS BT:" << button << pressed;
 
-void MainWindow::tcpInputDisconnected()
-{
-    showStatusInfo(tr("TCP Disconnected"), false);
-}
+#ifdef HAS_JOYSTICK
+    if (mJsType == JS_TYPE_MICRONAV_ONE) {
+        QWidget *fw = QApplication::focusWidget();
 
-void MainWindow::tcpInputDataAvailable()
-{
-    while (mTcpSocket->bytesAvailable() > 0) {
-        QByteArray data = mTcpSocket->readAll();
-        mPacketInterface->processData(data);
+        if (button == 1 && pressed) {
+            on_actionToggleFullscreen_triggered();
+        } else if (button == 3 && pressed) {
+            on_actionToggleCameraFullscreen_triggered();
+        } else if (button == 14 && pressed) {
+            if (fw) {
+                QKeyEvent *event = new QKeyEvent(
+                            QEvent::KeyPress, Qt::Key_Up, Qt::NoModifier);
+                QCoreApplication::postEvent(fw, event);
+            }
+        } else if (button == 10 && pressed) {
+            if (fw) {
+                QKeyEvent *event = new QKeyEvent(
+                            QEvent::KeyPress, Qt::Key_Down, Qt::NoModifier);
+                QCoreApplication::postEvent(fw, event);
+            }
+        } else  if (button == 13 && pressed) {
+            ui->mapWidget->removeLastRoutePoint();
+        }
+
+        if (mJoystick->getButton(12)) {
+            ui->mapWidget->setInteractionMode(MapWidget::InteractionModeShiftDown);
+        } else if (mJoystick->getButton(5)) {
+            ui->mapWidget->setInteractionMode(MapWidget::InteractionModeCtrlDown);
+        } else if (mJoystick->getButton(6)) {
+            ui->mapWidget->setInteractionMode(MapWidget::InteractionModeCtrlShiftDown);
+        } else {
+            ui->mapWidget->setInteractionMode(MapWidget::InteractionModeDefault);
+        }
     }
-}
-
-void MainWindow::tcpInputError(QAbstractSocket::SocketError socketError)
-{
-    (void)socketError;
-
-    QString errorStr = mTcpSocket->errorString();
-    qWarning() << "TCP Error:" << errorStr;
-    QMessageBox::warning(this, "TCP Error", errorStr);
-
-    mTcpSocket->close();
+#endif
 }
 
 void MainWindow::on_carAddButton_clicked()
-{
-    CarInterface *car = new CarInterface(this);
-    int id = mCars.size() + mCopters.size();
-    mCars.append(car);
-    QString name;
-    name.sprintf("Car %d", id);
-    car->setID(id);
-    ui->carsWidget->addTab(car, name);
-    car->setMap(ui->mapWidget);
-    car->setPacketInterface(mPacketInterface);
-
-    connect(car, SIGNAL(showStatusInfo(QString,bool)), this, SLOT(showStatusInfo(QString,bool)));
+{    
+    addCar(mCars.size() + mCopters.size());
 }
 
 void MainWindow::on_copterAddButton_clicked()
@@ -755,9 +897,7 @@ void MainWindow::on_serialConnectButton_clicked()
 
     mPacketInterface->stopUdpConnection();
 
-    if (mTcpSocket->isOpen()) {
-        mTcpSocket->close();
-    }
+    mTcpClientMulti->disconnectAll();
 }
 
 void MainWindow::on_serialRefreshButton_clicked()
@@ -795,9 +935,7 @@ void MainWindow::on_disconnectButton_clicked()
         mPacketInterface->stopUdpConnection();
     }
 
-    if (mTcpSocket->isOpen()) {
-        mTcpSocket->close();
-    }
+    mTcpClientMulti->disconnectAll();
 }
 
 void MainWindow::on_mapRemoveTraceButton_clicked()
@@ -819,9 +957,7 @@ void MainWindow::on_udpConnectButton_clicked()
             mSerialPort->close();
         }
 
-        if (mTcpSocket->isOpen()) {
-            mTcpSocket->close();
-        }
+        mTcpClientMulti->disconnectAll();
 
         mPacketInterface->startUdpConnection(ip, ui->udpPortBox->value());
 
@@ -841,13 +977,34 @@ void MainWindow::on_udpPingButton_clicked()
 
 void MainWindow::on_tcpConnectButton_clicked()
 {
-    mTcpSocket->abort();
-    mTcpSocket->connectToHost(ui->tcpIpEdit->text(), ui->tcpPortBox->value());
+    mTcpClientMulti->disconnectAll();
+    QStringList conns = ui->tcpConnEdit->toPlainText().split("\n");
+
+    for (QString c: conns) {
+        QStringList ipPort = c.split(":");
+
+        if (ipPort.size() == 1) {
+            mTcpClientMulti->addConnection(ipPort.at(0),
+                                           8300);
+        } else if (ipPort.size() == 2) {
+            mTcpClientMulti->addConnection(ipPort.at(0),
+                                           ipPort.at(1).toInt());
+        }
+    }
 }
 
 void MainWindow::on_tcpPingButton_clicked()
 {
-    mPing->pingHost(ui->tcpIpEdit->text(), 64, "TCP Host");
+    QStringList conns = ui->tcpConnEdit->toPlainText().split("\n");
+
+    for (QString c: conns) {
+        QStringList ipPort = c.split(":");
+
+        if (ipPort.size() == 2) {
+            mPing->pingHost(ipPort.at(0), 64, "TCP Host");
+            break;
+        }
+    }
 }
 
 void MainWindow::on_mapZeroButton_clicked()
@@ -868,34 +1025,7 @@ void MainWindow::on_mapRouteSpeedBox_valueChanged(double arg1)
 
 void MainWindow::on_jsConnectButton_clicked()
 {
-#ifdef HAS_JOYSTICK
-    if (mJoystick->init(ui->jsPortEdit->text()) == 0) {
-        qDebug() << "Axes:" << mJoystick->numAxes();
-        qDebug() << "Buttons:" << mJoystick->numButtons();
-        qDebug() << "Name:" << mJoystick->getName();
-
-
-        if (mJoystick->getName().contains("Sony PLAYSTATION(R)3")) {
-            mJsType = JS_TYPE_PS3;
-            qDebug() << "Treating joystick as PS3 USB controller.";
-            showStatusInfo("PS4 USB joystick connected!", true);
-        } else if (mJoystick->getName().contains("sony", Qt::CaseInsensitive)) {
-            mJsType = JS_TYPE_PS4;
-            qDebug() << "Treating joystick as PS4 USB controller.";
-            showStatusInfo("PS4 USB joystick connected!", true);
-        } else {
-            mJsType = JS_TYPE_HK;
-            qDebug() << "Treating joystick as hobbyking simulator.";
-            showStatusInfo("HK joystick connected!", true);
-        }
-    } else {
-        qWarning() << "Opening joystick failed.";
-        showStatusInfo("Opening joystick failed.", false);
-    }
-#else
-    QMessageBox::warning(this, "Joystick",
-                         "This build does not have joystick support.");
-#endif
+    connectJoystick(ui->jsPortEdit->text());
 }
 
 void MainWindow::on_jsDisconnectButton_clicked()
@@ -1025,7 +1155,7 @@ void MainWindow::on_mapSetAbsYawButton_clicked()
 {
     CarInfo *car = ui->mapWidget->getCarInfo(ui->mapCarBox->value());
     if (car) {
-        if (mSerialPort->isOpen() || mPacketInterface->isUdpConnected() || mTcpSocket->isOpen()) {
+        if (mSerialPort->isOpen() || mPacketInterface->isUdpConnected() || mTcpClientMulti->isAnyConnected()) {
             ui->mapSetAbsYawButton->setEnabled(false);
             ui->mapAbsYawSlider->setEnabled(false);
             bool ok = mPacketInterface->setYawOffsetAck(car->getId(), (double)ui->mapAbsYawSlider->value());
@@ -1067,7 +1197,7 @@ void MainWindow::on_stopButton_clicked()
 
 void MainWindow::on_mapUploadRouteButton_clicked()
 {
-    if (!mSerialPort->isOpen() && !mPacketInterface->isUdpConnected() && !mTcpSocket->isOpen()) {
+    if (!mSerialPort->isOpen() && !mPacketInterface->isUdpConnected() && !mTcpClientMulti->isAnyConnected()) {
         QMessageBox::warning(this, "Upload route",
                              "Serial port not connected.");
         return;
@@ -1137,7 +1267,7 @@ void MainWindow::on_mapUploadRouteButton_clicked()
 
 void MainWindow::on_mapGetRouteButton_clicked()
 {
-    if (!mSerialPort->isOpen() && !mPacketInterface->isUdpConnected() && !mTcpSocket->isOpen()) {
+    if (!mSerialPort->isOpen() && !mPacketInterface->isUdpConnected() && !mTcpClientMulti->isAnyConnected()) {
         QMessageBox::warning(this, "Get route",
                              "Car not connected.");
         return;
@@ -1557,134 +1687,18 @@ void MainWindow::on_actionLoadRoutes_triggered()
                                                     tr("Xml files (*.xml)"));
 
     if (!filename.isEmpty()) {
-        QFile file(filename);
-        if (!file.open(QIODevice::ReadOnly)) {
+        int res = utility::loadRoutes(filename, ui->mapWidget);
+
+        if (res >= 0) {
+            showStatusInfo("Loaded routes", true);
+        } else if (res == -1) {
             QMessageBox::critical(this, "Load Routes",
                                   "Could not open\n" + filename + "\nfor reading");
-            return;
-        }
-
-        QXmlStreamReader stream(&file);
-
-        // Look for routes tag
-        bool routes_found = false;
-        while (stream.readNextStartElement()) {
-            if (stream.name() == "routes") {
-                routes_found = true;
-                break;
-            }
-        }
-
-        if (routes_found) {
-            QList<QPair<int, QList<LocPoint> > > routes;
-            QList<LocPoint> anchors;
-
-            while (stream.readNextStartElement()) {
-                QString name = stream.name().toString();
-
-                if (name == "route") {
-                    int id = -1;
-                    QList<LocPoint> route;
-
-                    while (stream.readNextStartElement()) {
-                        QString name2 = stream.name().toString();
-
-                        if (name2 == "id") {
-                            id = stream.readElementText().toInt();
-                        } else if (name2 == "point") {
-                            LocPoint p;
-
-                            while (stream.readNextStartElement()) {
-                                QString name3 = stream.name().toString();
-
-                                if (name3 == "x") {
-                                    p.setX(stream.readElementText().toDouble());
-                                } else if (name3 == "y") {
-                                    p.setY(stream.readElementText().toDouble());
-                                } else if (name3 == "speed") {
-                                    p.setSpeed(stream.readElementText().toDouble());
-                                } else if (name3 == "time") {
-                                    p.setTime(stream.readElementText().toInt());
-                                } else {
-                                    qWarning() << ": Unknown XML element :" << name2;
-                                    stream.skipCurrentElement();
-                                }
-                            }
-
-                            route.append(p);
-                        } else {
-                            qWarning() << ": Unknown XML element :" << name2;
-                            stream.skipCurrentElement();
-                        }
-
-                        if (stream.hasError()) {
-                            qWarning() << " : XML ERROR :" << stream.errorString();
-                        }
-                    }
-
-                    routes.append(QPair<int, QList<LocPoint> >(id, route));
-                } else if (name == "anchors") {
-                    while (stream.readNextStartElement()) {
-                        QString name2 = stream.name().toString();
-
-                        if (name2 == "anchor") {
-                            LocPoint p;
-
-                            while (stream.readNextStartElement()) {
-                                QString name3 = stream.name().toString();
-
-                                if (name3 == "x") {
-                                    p.setX(stream.readElementText().toDouble());
-                                } else if (name3 == "y") {
-                                    p.setY(stream.readElementText().toDouble());
-                                } else if (name3 == "height") {
-                                    p.setHeight(stream.readElementText().toDouble());
-                                } else if (name3 == "id") {
-                                    p.setId(stream.readElementText().toInt());
-                                } else {
-                                    qWarning() << ": Unknown XML element :" << name2;
-                                    stream.skipCurrentElement();
-                                }
-                            }
-
-                            anchors.append(p);
-                        } else {
-                            qWarning() << ": Unknown XML element :" << name2;
-                            stream.skipCurrentElement();
-                        }
-
-                        if (stream.hasError()) {
-                            qWarning() << " : XML ERROR :" << stream.errorString();
-                        }
-                    }
-                }
-
-                if (stream.hasError()) {
-                    qWarning() << "XML ERROR :" << stream.errorString();
-                    qWarning() << stream.lineNumber() << stream.columnNumber();
-                }
-            }
-
-            for (QPair<int, QList<LocPoint> > r: routes) {
-                if (r.first >= 0) {
-                    int routeLast = ui->mapWidget->getRouteNow();
-                    ui->mapWidget->setRouteNow(r.first);
-                    ui->mapWidget->setRoute(r.second);
-                    ui->mapWidget->setRouteNow(routeLast);
-                } else {
-                    ui->mapWidget->addRoute(r.second);
-                }
-            }
-
-            for (LocPoint p: anchors) {
-                ui->mapWidget->addAnchor(p);
-            }
-
-            file.close();
-            showStatusInfo("Loaded routes", true);
-        } else {
+        } else if (res == -2) {
             QMessageBox::critical(this, "Load Routes",
                                   "routes tag not found in " + filename);
+        } else {
+            QMessageBox::critical(this, "Load Routes", "unknown error");
         }
     }
 }
@@ -2000,6 +2014,7 @@ void MainWindow::saveRoutes(bool withId)
                 stream.writeTextElement("y", QString::number(p.getY()));
                 stream.writeTextElement("speed", QString::number(p.getSpeed()));
                 stream.writeTextElement("time", QString::number(p.getTime()));
+                stream.writeTextElement("attributes", QString::number(p.getAttributes()));
                 stream.writeEndElement();
             }
             stream.writeEndElement();
@@ -2030,4 +2045,62 @@ void MainWindow::on_actionGPSSimulator_triggered()
 void MainWindow::on_mapDrawUwbTraceBox_toggled(bool checked)
 {
     ui->mapWidget->setDrawUwbTrace(checked);
+}
+
+void MainWindow::on_actionToggleFullscreen_triggered()
+{
+    if (isFullScreen()) {
+        showNormal();
+    } else {
+        showFullScreen();
+    }
+}
+
+void MainWindow::on_mapCameraWidthBox_valueChanged(double arg1)
+{
+    ui->mapWidget->setCameraImageWidth(arg1);
+}
+
+void MainWindow::on_mapCameraOpacityBox_valueChanged(double arg1)
+{
+    ui->mapWidget->setCameraImageOpacity(arg1);
+}
+
+void MainWindow::on_actionToggleCameraFullscreen_triggered()
+{
+    if (mCars.size() == 1) {
+        mCars[0]->toggleCameraFullscreen();
+    } else {
+        for (int i = 0;i < mCars.size();i++) {
+            if (mCars[i]->getId() == ui->mapCarBox->value()) {
+                mCars[i]->toggleCameraFullscreen();
+            }
+        }
+    }
+}
+
+void MainWindow::on_tabWidget_currentChanged(int index)
+{
+    // Focus on map widget when changing tab to it
+    if (index == 1) {
+        ui->mapWidget->setFocus();
+    }
+}
+
+void MainWindow::on_routeZeroButton_clicked()
+{
+    ui->mapWidget->zoomInOnRoute(ui->mapRouteBox->value(), 0.1);
+}
+
+void MainWindow::on_routeZeroAllButton_clicked()
+{
+    ui->mapWidget->zoomInOnRoute(-1, 0.1);
+}
+
+void MainWindow::on_mapRoutePosAttrBox_currentIndexChanged(int index)
+{
+    quint32 attr = ui->mapWidget->getRoutePointAttributes();
+    attr &= ~0b111;
+    attr |= index;
+    ui->mapWidget->setRoutePointAttributes(attr);
 }
