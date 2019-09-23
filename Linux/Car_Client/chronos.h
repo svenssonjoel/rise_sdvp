@@ -4,7 +4,6 @@
 #include <QObject>
 #include <QUdpSocket>
 #include <QTimer>
-#include <QElapsedTimer>
 
 #include "tcpserversimple.h"
 #include "packetinterface.h"
@@ -15,15 +14,14 @@ class Chronos : public QObject
     Q_OBJECT
 public:
     Chronos(QObject *parent = 0);
-    bool startServer(PacketInterface *packet, QHostAddress addr = QHostAddress::Any);
-    ChronosComm *comm();
+    bool startServer(PacketInterface *packet);
 
 private slots:
     void startTimerSlot();
     void connectionChanged(bool connected, QString address);
     void stateReceived(quint8 id, CAR_STATE state);
 
-    void processTraj(chronos_traj traj);
+    void processDotm(chronos_traj traj);
     void processOsem(chronos_osem osem);
     void processOstm(chronos_ostm ostm);
     void processStrt(chronos_strt strt);
@@ -35,7 +33,6 @@ private:
     PacketInterface *mPacket;
     ChronosComm *mChronos;
     QTimer *mStartTimer;
-    QElapsedTimer mScenarioTimer;
     bool mIsArmed;
     bool mIsStarted;
 

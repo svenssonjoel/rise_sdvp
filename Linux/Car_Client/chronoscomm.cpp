@@ -21,6 +21,7 @@
 
 ChronosComm::ChronosComm(QObject *parent) : QObject(parent)
 {
+    //qDebug() << "constructing";
     mTcpServer = new TcpServerSimple(this);
     mUdpSocket = new QUdpSocket(this);
     mTcpSocket = new QTcpSocket(this);
@@ -32,7 +33,6 @@ ChronosComm::ChronosComm(QObject *parent) : QObject(parent)
     mUdpPort = 0;
     mTransmitterId = 0;
     mChronosSeqNum = 0;
-    mCommMode = COMM_MODE_UNDEFINED;
 
     connect(mTcpServer, SIGNAL(dataRx(QByteArray)),
             this, SLOT(tcpRx(QByteArray)));
@@ -40,26 +40,19 @@ ChronosComm::ChronosComm(QObject *parent) : QObject(parent)
             this, SLOT(tcpConnectionChanged(bool,QString)));
     connect(mUdpSocket, SIGNAL(readyRead()),
             this, SLOT(readPendingDatagrams()));
-
-    connect(mTcpSocket, SIGNAL(readyRead()), this, SLOT(tcpInputDataAvailable()));
-    connect(mTcpSocket, SIGNAL(disconnected()),
-            this, SLOT(tcpInputDisconnected()));
-    connect(mTcpSocket, SIGNAL(error(QAbstractSocket::SocketError)),
-            this, SLOT(tcpInputError(QAbstractSocket::SocketError)));
 }
 
-bool ChronosComm::startObject(QHostAddress addr)
+bool ChronosComm::startObject()
 {
-    closeConnection();
+    bool res = mTcpServer->startServer(53241);
 
-    bool res = mTcpServer->startServer(53241, addr);
-    qDebug() << "Starting TCP server at" << addr.toString();
     if (!res) {
-      qWarning() << "Starting TCP server at" << addr.toString() << "failed:" << mTcpServer->errorString();
+        qWarning() << "Starting TCP server failed:" << mTcpServer->errorString();
     }
 
     if (res) {
-        res = mUdpSocket->bind(addr, 53240);
+        mUdpSocket->close();
+        res = mUdpSocket->bind(QHostAddress::Any, 53240);
     }
 
     if (!res) {
@@ -72,37 +65,14 @@ bool ChronosComm::startObject(QHostAddress addr)
         qWarning() << "Unable to start chronos object";
     }
 
-    if (res) {
-        mCommMode = COMM_MODE_OBJECT;
-    }
-
-    return res;
-}
-
-bool ChronosComm::startSupervisor(QHostAddress addr)
-{
-    closeConnection();
-
-    bool res = mTcpServer->startServer(53010, addr);
-
-    if (res) {
-        qDebug() << "Started CHRONOS supervisor";
-    } else {
-        qWarning() << "Unable to start chronos supervisor";
-    }
-
-    if (res) {
-        mCommMode = COMM_MODE_SUPERVISOR;
-    }
-
     return res;
 }
 
 bool ChronosComm::connectAsServer(QString address)
 {
-    closeConnection();
 
     mTcpSocket->connectToHost(address, 53241);
+
     bool res = mTcpSocket->waitForConnected(2000);
 
     if (!res) {
@@ -111,15 +81,12 @@ bool ChronosComm::connectAsServer(QString address)
 
     if (res) {
         mUdpHostAddress = mTcpSocket->peerAddress();
+        mUdpSocket->close();
         res = mUdpSocket->bind(QHostAddress::Any, 12349);
     }
 
     if (!res) {
         qWarning() << "Starting UDP server failed:" << mUdpSocket->errorString();
-    }
-
-    if (res) {
-        mCommMode = COMM_MODE_SERVER;
     }
 
     return res;
@@ -130,20 +97,13 @@ void ChronosComm::closeConnection()
     mTcpServer->stopServer();
     mTcpSocket->close();
     mUdpSocket->close();
-    mTcpState = 0;
-    mCommMode = COMM_MODE_UNDEFINED;
-}
-
-COMM_MODE ChronosComm::getCommMode()
-{
-    return mCommMode;
 }
 
 void ChronosComm::sendTraj(chronos_traj traj)
 {
     qDebug() << "Sending TRAJ";
 
-    QVector<chronos_traj_pt> points = traj.traj_pts;
+    QVector<chronos_dotm_pt> points = traj.dotm_pts;
 
     VByteArrayLe vb;
     vb.vbAppendUint16(ISO_VALUE_ID_TRAJECTORY_ID);
@@ -152,30 +112,15 @@ void ChronosComm::sendTraj(chronos_traj traj)
     vb.vbAppendUint16(ISO_VALUE_ID_TRAJECTORY_NAME);
     vb.vbAppendUint16(64);
 
-    traj.traj_name.truncate(63);
-
-    for (char c: traj.traj_name.toUtf8()){
+    for (char c: traj.traj_name){
         vb.vbAppendUint8((uint8_t)c);
     }
-
-    for (int i = traj.traj_name.size();i < 64;i++) {
-        vb.vbAppendUint8(0);
-    }
-
     vb.vbAppendUint16(ISO_VALUE_ID_TRAJECTORY_VERSION);
     vb.vbAppendUint16(2);
     vb.vbAppendUint16(traj.traj_ver);
 
-    vb.vbAppendUint16(AUX_VALUE_ID_OBJECT_ID);
-    vb.vbAppendUint16(4);
-    vb.vbAppendUint32(traj.object_id);
-
-//    char buf[256];
-//    snprintf(buf, 256, "%x", traj.object_id);
-//    qDebug() << "TRAJ out IP: " << buf; // << traj.object_id;
-
     //qDebug() << "Appending number of points: " << points.size();
-    for (chronos_traj_pt pt: points) {
+    for (chronos_dotm_pt pt: points) {
         vb.vbAppendUint16(ISO_VALUE_ID_REL_TIME);
         vb.vbAppendUint16(4);
         vb.vbAppendUint32(pt.tRel); // TODO: Multiply with 4?
@@ -187,7 +132,7 @@ void ChronosComm::sendTraj(chronos_traj traj)
         vb.vbAppendDouble32(pt.y, 1e3);
         vb.vbAppendUint16(ISO_VALUE_ID_Z_POS);
         vb.vbAppendUint16(4);
-        vb.vbAppendDouble32(pt.z, 1e3); // 32
+        vb.vbAppendDouble32(pt.z, 1e3);
         vb.vbAppendUint16(ISO_VALUE_ID_HEADING);
         vb.vbAppendUint16(2);
         vb.vbAppendUint16(1e2 * pt.heading * 180.0 / M_PI);
@@ -203,9 +148,65 @@ void ChronosComm::sendTraj(chronos_traj traj)
         vb.vbAppendUint16(ISO_VALUE_ID_LAT_ACC);
         vb.vbAppendUint16(2);
         vb.vbAppendDouble16(pt.lat_accel, 1e3);
-        vb.vbAppendUint16(ISO_VALUE_ID_CURVATURE); // 64
+        vb.vbAppendUint16(ISO_VALUE_ID_CURVATURE);
         vb.vbAppendUint16(4);
-        vb.vbAppendDouble32(pt.curvature, 3e4); // 70
+        vb.vbAppendDouble32(pt.curvature, 3e4);
+    }
+
+    vb.vbAppendUint16(AUX_VALUE_ID_OBJECT_ID);
+    vb.vbAppendUint16(4);
+    vb.vbAppendUint32(traj.object_id);
+
+    mkChronosHeader(vb,
+                    mTransmitterId,
+                    mChronosSeqNum++,
+                    false,
+                    PROTOCOL_VERSION,
+                    ISO_MSG_DOTM);
+
+    appendChronosChecksum(vb);
+
+    mTcpSocket->write(vb);
+}
+
+
+void ChronosComm::sendDotm(QVector<chronos_dotm_pt> dotm)
+{
+    qDebug() << "Sending DOTM";
+
+    VByteArrayLe vb;
+
+    for (chronos_dotm_pt pt: dotm) {
+        vb.vbAppendUint16(ISO_VALUE_ID_REL_TIME);
+        vb.vbAppendUint16(4);
+        vb.vbAppendUint32(pt.tRel); // TODO: Multiply with 4?
+        vb.vbAppendUint16(ISO_VALUE_ID_X_POS);
+        vb.vbAppendUint16(4);
+        vb.vbAppendDouble32(pt.x, 1e3);
+        vb.vbAppendUint16(ISO_VALUE_ID_Y_POS);
+        vb.vbAppendUint16(4);
+        vb.vbAppendDouble32(pt.y, 1e3);
+        vb.vbAppendUint16(ISO_VALUE_ID_Z_POS);
+        vb.vbAppendUint16(4);
+        vb.vbAppendDouble32(pt.z, 1e3);
+        vb.vbAppendUint16(ISO_VALUE_ID_HEADING);
+        vb.vbAppendUint16(2);
+        vb.vbAppendUint16(1e2 * pt.heading * 180.0 / M_PI);
+        vb.vbAppendUint16(ISO_VALUE_ID_LONG_SPEED);
+        vb.vbAppendUint16(2);
+        vb.vbAppendDouble16(pt.long_speed, 1e2);
+        vb.vbAppendUint16(ISO_VALUE_ID_LAT_SPEED);
+        vb.vbAppendUint16(2);
+        vb.vbAppendDouble16(pt.lat_speed, 1e2);
+        vb.vbAppendUint16(ISO_VALUE_ID_LONG_ACC);
+        vb.vbAppendUint16(2);
+        vb.vbAppendDouble16(pt.long_accel, 1e3);
+        vb.vbAppendUint16(ISO_VALUE_ID_LAT_ACC);
+        vb.vbAppendUint16(2);
+        vb.vbAppendDouble16(pt.lat_accel, 1e3);
+        vb.vbAppendUint16(ISO_VALUE_ID_CURVATURE);
+        vb.vbAppendUint16(4);
+        vb.vbAppendDouble32(pt.curvature, 3e4);
     }
 
     mkChronosHeader(vb,
@@ -213,18 +214,16 @@ void ChronosComm::sendTraj(chronos_traj traj)
                     mChronosSeqNum++,
                     false,
                     PROTOCOL_VERSION,
-                    ISO_MSG_TRAJ);
+                    ISO_MSG_DOTM);
 
     appendChronosChecksum(vb);
 
-    sendData(vb, false);
+    mTcpSocket->write(vb);
 }
 
 void ChronosComm::sendHeab(chronos_heab heab)
 {
     VByteArrayLe vb;
-    vb.vbAppendUint16(ISO_VALUE_ID_HEAB_STRUCT);
-    vb.vbAppendUint16(5); // sizeof(chronos_heab)
     vb.vbAppendUint32(heab.gps_ms_of_week * 4);
     vb.vbAppendUint8(heab.status);
 
@@ -237,7 +236,7 @@ void ChronosComm::sendHeab(chronos_heab heab)
 
     appendChronosChecksum(vb);
 
-    sendData(vb, true);
+    mUdpSocket->writeDatagram(vb, mUdpHostAddress, 53240);
 }
 
 void ChronosComm::sendOsem(chronos_osem osem)
@@ -246,10 +245,10 @@ void ChronosComm::sendOsem(chronos_osem osem)
 
     vb.vbAppendUint16(ISO_VALUE_ID_LAT);
     vb.vbAppendUint16(6);
-    vb.vbAppendUint48((quint64)(osem.lat * 1e10));
+    vb.vbAppendUint48((quint64)(osem.lat * 1e10)); //1e7
     vb.vbAppendUint16(ISO_VALUE_ID_LON);
     vb.vbAppendUint16(6);
-    vb.vbAppendUint48((quint64)(osem.lon * 1e10));
+    vb.vbAppendUint48((quint64)(osem.lon * 1e10)); //1e7
     vb.vbAppendUint16(ISO_VALUE_ID_ALT);
     vb.vbAppendUint16(4);
     vb.vbAppendUint32((quint32)(osem.alt * 1e2));
@@ -269,7 +268,7 @@ void ChronosComm::sendOsem(chronos_osem osem)
 
     appendChronosChecksum(vb);
 
-    sendData(vb, false);
+    mTcpSocket->write(vb);
 }
 
 void ChronosComm::sendOstm(chronos_ostm ostm)
@@ -288,7 +287,7 @@ void ChronosComm::sendOstm(chronos_ostm ostm)
 
     appendChronosChecksum(vb);
 
-    sendData(vb, false);
+    mTcpSocket->write(vb);
 }
 
 void ChronosComm::sendStrt(chronos_strt strt)
@@ -299,7 +298,7 @@ void ChronosComm::sendStrt(chronos_strt strt)
     vb.vbAppendUint32(strt.gps_ms_of_week * 4);
     vb.vbAppendUint16(ISO_VALUE_ID_GPS_WEEK);
     vb.vbAppendUint16(2);
-    vb.vbAppendUint32(strt.gps_week);
+    vb.vbAppendUint16(strt.gps_week);
 
     mkChronosHeader(vb,
                     mTransmitterId,
@@ -310,14 +309,12 @@ void ChronosComm::sendStrt(chronos_strt strt)
 
     appendChronosChecksum(vb);
 
-    sendData(vb, false);
+    mTcpSocket->write(vb);
 }
 
 void ChronosComm::sendMonr(chronos_monr monr)
 {
     VByteArrayLe vb;
-    vb.vbAppendUint16(ISO_VALUE_ID_MONR_STRUCT);
-    vb.vbAppendUint16(sizeof(chronos_monr));
     vb.vbAppendUint32(monr.gps_ms_of_week * 4);
     vb.vbAppendDouble32(monr.x,1e3);
     vb.vbAppendDouble32(monr.y,1e3);
@@ -341,26 +338,7 @@ void ChronosComm::sendMonr(chronos_monr monr)
 
     appendChronosChecksum(vb);
 
-    sendData(vb, true);
-}
-
-void ChronosComm::sendInitSup(chronos_init_sup init_sup)
-{
-    VByteArrayLe vb;
-    vb.vbAppendUint16(ISO_VALUE_ID_INIT_SUP_STATUS);
-    vb.vbAppendUint16(1);
-    vb.vbAppendUint8(init_sup.status);
-
-    mkChronosHeader(vb,
-                    mTransmitterId,
-                    mChronosSeqNum++,
-                    false,
-                    PROTOCOL_VERSION,
-                    ISO_MSG_INIT_SUP);
-
-    appendChronosChecksum(vb);
-
-    sendData(vb, false);
+    mUdpSocket->writeDatagram(vb, mUdpHostAddress, mUdpPort);
 }
 
 quint8 ChronosComm::transmitterId() const
@@ -393,7 +371,8 @@ quint32 ChronosComm::gpsMsOfWeekToUtcToday(quint64 time)
 
 void ChronosComm::tcpRx(QByteArray data)
 {
-    uint8_t sender_id = 0;
+    //qDebug() << "TCP RX";
+
     for (char c: data) {
         switch (mTcpState) {
         case 0: // first byte of sync word
@@ -413,7 +392,7 @@ void ChronosComm::tcpRx(QByteArray data)
             mTcpState++;
             break;
         case 2: // Transmitter ID
-            sender_id = (uint8_t)c;
+            // Ignore for now
             mTcpState++;
             break;
         case 3: // Sequence number
@@ -471,7 +450,8 @@ void ChronosComm::tcpRx(QByteArray data)
             mTcpState = 0;
 
             if (mTcpChecksum == 0) {
-                decodeMsg(mTcpType, mTcpLen, mTcpData, sender_id);
+                //qDebug() << "TCP Message length: " << mTcpLen;
+                decodeMsg(mTcpType, mTcpLen, mTcpData);
             } else {
                 qWarning() << "Invalid checksum";
             }
@@ -489,7 +469,8 @@ void ChronosComm::tcpConnectionChanged(bool connected, QString address)
 
 void ChronosComm::readPendingDatagrams()
 {
-    while (mUdpSocket->hasPendingDatagrams()) {
+
+      while (mUdpSocket->hasPendingDatagrams()) {
         QByteArray datagram;
         datagram.resize(mUdpSocket->pendingDatagramSize());
 
@@ -499,7 +480,7 @@ void ChronosComm::readPendingDatagrams()
         VByteArrayLe vb(datagram);
 
         /*quint16 sync_word   = */ vb.vbPopFrontUint16();
-        uint8_t sender_id = vb.vbPopFrontUint8();
+        /*quint8  sender_id   = */ vb.vbPopFrontUint8();
         /*quint8  seq_num     = */ vb.vbPopFrontUint8();
         /*quint8  prot_ver    = */ vb.vbPopFrontUint8();  // includes ack bit
         quint16 message_id  = vb.vbPopFrontUint16();
@@ -517,7 +498,7 @@ void ChronosComm::readPendingDatagrams()
         vb.remove(vb.size() - 2, 2);
 
         if (checksum == 0) {
-            decodeMsg(message_id, message_len, vb, sender_id);
+            decodeMsg(message_id, message_len, vb);
         } else {
             qDebug() << "Checksum Error";
         }
@@ -536,7 +517,9 @@ void ChronosComm::tcpInputDisconnected()
 
 void ChronosComm::tcpInputDataAvailable()
 {
+    //qDebug() << "TCPINPUT: " << mTcpSocket->bytesAvailable();
     while (mTcpSocket->bytesAvailable() > 0) {
+        //qDebug() << "GOING INTO tcpRx";
         tcpRx(mTcpSocket->readAll());
     }
 }
@@ -574,140 +557,118 @@ void ChronosComm::appendChronosChecksum(VByteArrayLe &vb)
     vb.vbAppendUint16(0);
 }
 
-bool ChronosComm::decodeMsg(quint16 type, quint32 len, QByteArray payload, uint8_t sender_id)
+bool ChronosComm::decodeMsg(quint16 type, quint32 len, QByteArray payload)
 {
     (void)len;
+    int i = 0;
 
     VByteArrayLe vb(payload);
 
     switch (type) {
-    case ISO_MSG_INIT_SUP: {
-        chronos_init_sup init_sup;
-        init_sup.status = 0;
-
-        while (!vb.isEmpty()) {
-            quint16 value_id  = vb.vbPopFrontUint16();
-            quint16 value_len = vb.vbPopFrontUint16();
-
-            switch (value_id) {
-            case ISO_VALUE_ID_INIT_SUP_STATUS:
-                init_sup.status = vb.vbPopFrontUint8();
-                break;
-            default:
-                vb.remove(0, value_len);
-                break;
-            }
-        }
-
-        emit insupRx(init_sup);
-    } break;
-
-    case ISO_MSG_TRAJ: {
-        qDebug() << "decoding TRAJ";
+    case ISO_MSG_DOTM: {
+        qDebug() << "decoding DOTM";
 
         chronos_traj traj;
-        QVector<chronos_traj_pt> path;
+
+        QVector<chronos_dotm_pt> path;
+
         QVector<int> ids;
-        chronos_traj_pt pt;
+        chronos_dotm_pt pt;
         memset(&pt, 0, sizeof(pt));
 
         while (!vb.isEmpty()) {
             quint16 value_id = vb.vbPopFrontUint16();
             quint16 value_len = vb.vbPopFrontUint16();
+            //qDebug() << "Value_id: " << value_id;
+            //qDebug() << "Value_len: " << value_len;
 
-            // Repeated value, probably at next point
+            // Problem: Skippar lägga till sista punkten
             if (ids.indexOf(value_id) >= 0) {
                 path.append(pt);
                 memset(&pt, 0, sizeof(pt));
                 ids.clear();
             }
 
+            ids.append(value_id);
+
             switch (value_id) {
             case ISO_VALUE_ID_REL_TIME:
-                pt.tRel = vb.vbPopFrontUint32(); // TODO: Divide by 4?
-                ids.append(value_id);
+                pt.tRel = vb.vbPopFrontUint32(); // TODO: Divide by 4? (Not sure, time seems to match what I get form Chronos Serv)
+                //qDebug() << "tRel: " << pt.tRel;
                 break;
             case ISO_VALUE_ID_X_POS:
                 pt.x = vb.vbPopFrontDouble32(1e3);
-                ids.append(value_id);
+                //qDebug() << "X: " << pt.x;
                 break;
             case ISO_VALUE_ID_Y_POS:
                 pt.y = vb.vbPopFrontDouble32(1e3);
-                ids.append(value_id);
+                //qDebug() << "Y: " << pt.y;
                 break;
             case ISO_VALUE_ID_Z_POS:
                 pt.z = vb.vbPopFrontDouble32(1e3);
-                ids.append(value_id);
+                //qDebug() << "Z: " << pt.z;
                 break;
             case ISO_VALUE_ID_HEADING:
                 pt.heading = vb.vbPopFrontDouble16(1e1);
-                ids.append(value_id);
+                //qDebug() << "Heading: " << pt.heading;
                 break;
             case ISO_VALUE_ID_LONG_SPEED:
                 pt.long_speed = vb.vbPopFrontDouble16(1e2);
-                ids.append(value_id);
+                //qDebug() << "long_speed: " << pt.long_speed;
                 break;
             case ISO_VALUE_ID_LAT_SPEED:
                 pt.lat_speed = vb.vbPopFrontDouble16(1e2);
-                ids.append(value_id);
+                //qDebug() << "lat_speed: " << pt.lat_speed;
                 break;
             case ISO_VALUE_ID_LONG_ACC:
                 pt.long_accel = vb.vbPopFrontDouble16(1e3);
-                ids.append(value_id);
+                //qDebug() << "long_accel: " << pt.long_accel;
                 break;
             case ISO_VALUE_ID_LAT_ACC:
                 pt.lat_accel = vb.vbPopFrontDouble16(1e3);
-                ids.append(value_id);
+                //qDebug() << "lat_accel: " << pt.lat_accel;
                 break;
             case ISO_VALUE_ID_CURVATURE:
                 pt.curvature = vb.vbPopFrontDouble32(3e4);
-                ids.append(value_id);
+                //qDebug() << "CURVATURE: " << pt.curvature;
                 break;
             case AUX_VALUE_ID_OBJECT_ID:
                 traj.object_id = vb.vbPopFrontUint32();
+                //qDebug() << "IP: " << traj.object_id;
                 break;
             case ISO_VALUE_ID_TRAJECTORY_ID:
                 traj.traj_id = vb.vbPopFrontUint16();
                 break;
             case ISO_VALUE_ID_TRAJECTORY_NAME:
-                traj.traj_name = vb.left(64);
-                vb.remove(0, 64);
-            break;
+                for (i = 0; i < 64; i ++) {
+                    traj.traj_name.append((char)vb.vbPopFrontUint8());
+                }
+                break;
             case ISO_VALUE_ID_TRAJECTORY_VERSION:
                 traj.traj_ver = vb.vbPopFrontUint16();
                 break;
             default:
+                //qDebug() << "DOTM: Unknown value id: " << value_id;
                 vb.remove(0, value_len);
                 break;
             }
         }
 
-        // Add last point
-        if (!ids.isEmpty()) {
+        if (ids.indexOf(ISO_VALUE_ID_X_POS) >= 0) { // MEGAHACK!
             path.append(pt);
+            memset(&pt, 0, sizeof(pt));
+            ids.clear();
         }
-
-        traj.traj_pts = path;
-        emit trajRx(traj);
+        traj.dotm_pts = path;
+        qDebug() << "decoded traj of size: " << traj.dotm_pts.size();
+        emit dotmRx(traj);
     } break;
 
     case ISO_MSG_HEAB: {
         chronos_heab heab;
-        while (!vb.isEmpty()) {
-            quint16 value_id = vb.vbPopFrontUint16();
-            quint16 value_len = vb.vbPopFrontUint16();
-            switch(value_id) {
-            case ISO_VALUE_ID_HEAB_STRUCT:
-                heab.gps_ms_of_week = vb.vbPopFrontUint32() / 4;
-                heab.status   = vb.vbPopFrontUint8();
-                emit heabRx(heab);
-                break;
-            default:
-                qDebug() << "HEAB: Unknown value id:" << value_id;
-                vb.remove(0, value_len);
-                break;
-            }
-        }
+        heab.gps_ms_of_week = vb.vbPopFrontUint32() / 4;
+        heab.status   = vb.vbPopFrontUint8();
+        emit heabRx(heab);
     } break;
 
     case ISO_MSG_OSEM: {
@@ -718,10 +679,10 @@ bool ChronosComm::decodeMsg(quint16 type, quint32 len, QByteArray payload, uint8
             quint16 value_len = vb.vbPopFrontUint16();
             switch (value_id) {
             case ISO_VALUE_ID_LAT:
-                osem.lat = vb.vbPopFrontDouble48(1e10);
+                osem.lat = vb.vbPopFrontDouble48(1e10); // 1e7
                 break;
             case ISO_VALUE_ID_LON:
-                osem.lon = vb.vbPopFrontDouble48(1e10);
+                osem.lon = vb.vbPopFrontDouble48(1e10); // 1e7
                 break;
             case ISO_VALUE_ID_ALT:
                 osem.alt = vb.vbPopFrontDouble32(1e2);
@@ -736,7 +697,7 @@ bool ChronosComm::decodeMsg(quint16 type, quint32 len, QByteArray payload, uint8
                 osem.gps_ms_of_week = vb.vbPopFrontUint32() / 4;
                 break;
             default:
-                qDebug() << "OSEM: Unknown value id:" << value_id;
+                qDebug() << "OSEM: Unknown value id: " << value_id;
                 vb.remove(0, value_len);
                 break;
             }
@@ -757,7 +718,7 @@ bool ChronosComm::decodeMsg(quint16 type, quint32 len, QByteArray payload, uint8
                 break;
 
             default:
-                qDebug() << "OSTM: Unknown value id";
+                qDebug() << "OSTM: Unknown value id: " << value_id;
                 vb.remove(0, value_len);
                 break;
             }
@@ -768,11 +729,9 @@ bool ChronosComm::decodeMsg(quint16 type, quint32 len, QByteArray payload, uint8
 
     case ISO_MSG_STRT: {
         chronos_strt strt;
-        strt.gps_ms_of_week = gpsMsOfWeek();
-        strt.gps_week = gpsWeek();
 
         while (!vb.isEmpty()) {
-            quint16 value_id = vb.vbPopFrontUint16();
+            quint16 value_id  = vb.vbPopFrontUint16();
             quint16 value_len = vb.vbPopFrontUint16();
             switch(value_id) {
             case ISO_VALUE_ID_GPS_SEC_OF_WEEK:
@@ -781,46 +740,34 @@ bool ChronosComm::decodeMsg(quint16 type, quint32 len, QByteArray payload, uint8
             case ISO_VALUE_ID_GPS_WEEK:
                 strt.gps_week = vb.vbPopFrontUint16();
                 break;
+
             default:
-                qDebug() << "STRT: Unknown value id" << value_id;
+                qDebug() << "STRT: Unknown value id: " << value_id;
                 vb.remove(0, value_len);
                 break;
             }
         }
 
-        qDebug() << "STRT: " << strt.gps_week << strt.gps_ms_of_week;
         emit strtRx(strt);
     } break;
 
     case ISO_MSG_MONR: {
         chronos_monr monr;
         VByteArrayLe vb(payload);
-        while (!vb.isEmpty()) {
-            quint16 value_id = vb.vbPopFrontUint16();
-            quint16 value_len = vb.vbPopFrontUint16();
-            switch(value_id) {
-            case ISO_VALUE_ID_MONR_STRUCT:
-                monr.gps_ms_of_week = vb.vbPopFrontUint32() / 4;
-                monr.x = vb.vbPopFrontDouble32(1e3);
-                monr.y = vb.vbPopFrontDouble32(1e3);
-                monr.z = vb.vbPopFrontDouble32(1e3);
-                monr.heading = ((double)vb.vbPopFrontUint16()) / 1e2;
-                monr.lon_speed = vb.vbPopFrontDouble16(1e2);
-                monr.lat_speed = vb.vbPopFrontDouble16(1e2);
-                monr.lon_acc = vb.vbPopFrontDouble16(1e2);
-                monr.lat_acc = vb.vbPopFrontDouble16(1e2);
-                monr.direction = vb.vbPopFrontUint8();
-                monr.status = vb.vbPopFrontUint8();
-                monr.rdyToArm = vb.vbPopFrontUint8();
-                monr.error = vb.vbPopFrontUint8();
-                monr.sender_id = sender_id;
-                emit monrRx(monr);
-            default:
-                qDebug() << "STRT: Unknown value id" << value_id;
-                vb.remove(0, value_len);
-                break;
-            }
-        }
+        monr.gps_ms_of_week = vb.vbPopFrontUint32() / 4;
+        monr.x = vb.vbPopFrontDouble32(1e3);
+        monr.y = vb.vbPopFrontDouble32(1e3);
+        monr.z = vb.vbPopFrontDouble32(1e3);
+        monr.heading = ((double)vb.vbPopFrontUint16()) / 1e2;
+        monr.lon_speed = vb.vbPopFrontDouble16(1e2);
+        monr.lat_speed = vb.vbPopFrontDouble16(1e2);
+        monr.lon_acc = vb.vbPopFrontDouble16(1e2);
+        monr.lat_acc = vb.vbPopFrontDouble16(1e2);
+        monr.direction = vb.vbPopFrontUint8();
+        monr.status = vb.vbPopFrontUint8();
+        monr.rdyToArm = vb.vbPopFrontUint8();
+        monr.error = vb.vbPopFrontUint8();
+        emit monrRx(monr);
     } break;
 
     default:
@@ -828,17 +775,4 @@ bool ChronosComm::decodeMsg(quint16 type, quint32 len, QByteArray payload, uint8
     }
 
     return true;
-}
-
-void ChronosComm::sendData(QByteArray data, bool isUdp)
-{
-    if (isUdp && mCommMode != COMM_MODE_SUPERVISOR) {
-        mUdpSocket->writeDatagram(data, mUdpHostAddress, mUdpPort ? mUdpPort : 53240);
-    } else {
-        if (mTcpSocket->state() == QTcpSocket::ConnectedState) {
-            mTcpSocket->write(data);
-        } else {
-            mTcpServer->sendData(data);
-        }
-    }
 }
